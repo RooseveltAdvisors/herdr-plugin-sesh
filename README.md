@@ -43,13 +43,13 @@ Sesh concepts map onto Herdr as follows:
 Install the plugin directly from GitHub:
 
 ```bash
-herdr plugin install fullerzz/herdr-plugin-sesh
+herdr plugin install RooseveltAdvisors/herdr-plugin-sesh
 ```
 
 Herdr previews the plugin manifest and build command before installation. To
 skip the confirmation in a non-interactive environment, add `--yes`. To pin a
 release, add `--ref <release-tag>` using a tag from the
-[GitHub releases](https://github.com/fullerzz/herdr-plugin-sesh/releases) page.
+[GitHub releases](https://github.com/RooseveltAdvisors/herdr-plugin-sesh/releases) page.
 
 This repository is also discoverable through the
 [Herdr plugin marketplace](https://herdr.dev/plugins/) via the `herdr-plugin`
@@ -61,14 +61,14 @@ security reviews.
 Open the picker through the installed plugin action:
 
 ```bash
-herdr plugin action invoke fullerzz.sesh.open-picker
+herdr plugin action invoke RooseveltAdvisors.herdr-sesh.open-picker
 ```
 
 You can also open its overlay pane directly:
 
 ```bash
 herdr plugin pane open \
-  --plugin fullerzz.sesh \
+  --plugin RooseveltAdvisors.herdr-sesh \
   --entrypoint picker \
   --placement overlay
 ```
@@ -92,7 +92,7 @@ location:
 Ask Herdr for the managed configuration directory:
 
 ```bash
-herdr plugin config-dir fullerzz.sesh
+herdr plugin config-dir RooseveltAdvisors.herdr-sesh
 ```
 
 See the [configuration reference](docs/config.md) for supported settings and a
@@ -134,8 +134,8 @@ just install-plugin
 Herdr. Verify the local plugin with:
 
 ```bash
-herdr plugin action list --plugin fullerzz.sesh
-herdr plugin log list --plugin fullerzz.sesh
+herdr plugin action list --plugin RooseveltAdvisors.herdr-sesh
+herdr plugin log list --plugin RooseveltAdvisors.herdr-sesh
 ```
 
 ## Release
