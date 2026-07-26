@@ -392,7 +392,7 @@ func (a *App) window(ctx context.Context, args []string) error {
 }
 func (a *App) plugin(ctx context.Context, args []string) error {
 	if len(args) >= 1 && args[0] == "open-picker" {
-		return herdr.NewCLIClient().PluginPaneOpen(ctx, "fullerzz.sesh", "picker", "overlay")
+		return herdr.NewCLIClient().PluginPaneOpen(ctx, "RooseveltAdvisors.herdr-sesh", "picker", "overlay")
 	}
 	return errors.New("unknown plugin command")
 }
