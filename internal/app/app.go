@@ -360,8 +360,10 @@ func (a *App) last(ctx context.Context, _ []string) error {
 		return errors.New("no previous workspace recorded")
 	}
 	if err := herdr.NewCLIClient().WorkspaceFocus(ctx, id); err != nil {
-		if clearErr := state.ClearWorkspaceLast(stateDir, id); clearErr != nil {
-			a.warnf("could not clear unavailable workspace: %v", clearErr)
+		if herdr.IsMissingTarget(err) {
+			if clearErr := state.ClearWorkspaceLast(stateDir, id); clearErr != nil {
+				a.warnf("could not clear unavailable workspace: %v", clearErr)
+			}
 		}
 		return err
 	}
@@ -385,13 +387,18 @@ func (a *App) lastAgent(ctx context.Context, _ []string) error {
 		_ = state.ClearAgentLast(stateDir, target)
 		return errors.New("previous agent/tab is missing a tab id")
 	}
-	crossWorkspace := current.WorkspaceID != "" && target.WorkspaceID != "" && current.WorkspaceID != target.WorkspaceID
-	if err := state.PrepareAgentJump(stateDir, crossWorkspace); err != nil {
+	skipWorkspaceID := ""
+	if current.WorkspaceID != "" && target.WorkspaceID != "" && current.WorkspaceID != target.WorkspaceID {
+		skipWorkspaceID = target.WorkspaceID
+	}
+	if err := state.PrepareAgentJump(stateDir, skipWorkspaceID); err != nil {
 		a.warnf("could not prepare agent jump: %v", err)
 	}
 	if err := herdr.NewCLIClient().TabFocus(ctx, target.TabID); err != nil {
-		if clearErr := state.ClearAgentLast(stateDir, target); clearErr != nil {
-			a.warnf("could not clear unavailable agent/tab: %v", clearErr)
+		if herdr.IsMissingTarget(err) {
+			if clearErr := state.ClearAgentLast(stateDir, target); clearErr != nil {
+				a.warnf("could not clear unavailable agent/tab: %v", clearErr)
+			}
 		}
 		if clearSkipErr := state.ClearWorkspaceSkip(stateDir); clearSkipErr != nil {
 			a.warnf("could not clear workspace skip: %v", clearSkipErr)

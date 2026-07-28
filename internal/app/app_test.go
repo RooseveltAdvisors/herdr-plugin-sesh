@@ -460,6 +460,38 @@ func TestLastClearsUnavailableWorkspaceDestination(t *testing.T) {
 	}
 }
 
+func TestLastKeepsDestinationWhenFocusFailsTransiently(t *testing.T) {
+	d := t.TempDir()
+	stateDir := filepath.Join(d, "state")
+	if err := state.ObserveWorkspaceFocus(stateDir, "previous"); err != nil {
+		t.Fatal(err)
+	}
+	if err := state.ObserveWorkspaceFocus(stateDir, "current"); err != nil {
+		t.Fatal(err)
+	}
+	fakeHerdr := filepath.Join(d, "herdr")
+	script := "#!/bin/sh\necho 'herdr daemon is not running' >&2\nexit 1\n"
+	//nolint:gosec // test creates a local executable fixture.
+	if err := os.WriteFile(fakeHerdr, []byte(script), 0700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HERDR_BIN_PATH", fakeHerdr)
+	t.Setenv("HERDR_PLUGIN_STATE_DIR", stateDir)
+	t.Setenv("HERDR_WORKSPACE_ID", "current")
+
+	a := &App{Out: &bytes.Buffer{}, Err: &bytes.Buffer{}}
+	if err := a.Run(context.Background(), []string{"last"}); err == nil {
+		t.Fatal("expected focus failure")
+	}
+	m, err := state.LoadFocusMRU(stateDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if m.WorkspaceLast != "previous" {
+		t.Fatalf("workspace_last=%q want previous preserved across transient failure", m.WorkspaceLast)
+	}
+}
+
 func runPickerJSON(t *testing.T, cfgPath, zoxideOutput string) []model.Session {
 	t.Helper()
 	configureFakeSources(t, zoxideOutput)

@@ -39,9 +39,14 @@ type FocusMRU struct {
 	AgentCurrent AgentRef `json:"agent_current,omitempty"`
 	AgentLast    AgentRef `json:"agent_last,omitempty"`
 
-	// SkipWorkspaceRecord suppresses the next workspace.focused observation so
-	// last-agent can cross workspaces without corrupting the workspace pair.
-	SkipWorkspaceRecord bool `json:"skip_workspace_record,omitempty"`
+	// SkipWorkspaceID suppresses a single workspace.focused observation for that
+	// exact workspace so last-agent can cross workspaces without corrupting the
+	// workspace pair. Any other observation clears it instead of being swallowed.
+	SkipWorkspaceID string `json:"skip_workspace_id,omitempty"`
+
+	// Migrated records that the two-slot fields have been seeded from the legacy
+	// workspaces list, so an intentionally cleared slot is never re-seeded.
+	Migrated bool `json:"migrated,omitempty"`
 }
 
 const mruFile = "history.json"
@@ -55,6 +60,7 @@ func LoadFocusMRU(dir string) (FocusMRU, error) {
 	}
 	b, err := os.ReadFile(mruPath(dir))
 	if os.IsNotExist(err) {
+		m.Migrated = true
 		return m, nil
 	}
 	if err != nil {
@@ -62,7 +68,7 @@ func LoadFocusMRU(dir string) (FocusMRU, error) {
 	}
 	if err := json.Unmarshal(b, &m); err != nil {
 		if isJSONDecodeError(err) {
-			return FocusMRU{}, nil
+			return FocusMRU{Migrated: true}, nil
 		}
 		return m, err
 	}
@@ -81,8 +87,17 @@ func SaveFocusMRU(dir string, m FocusMRU) error {
 	return writeJSONFile(mruPath(dir), m)
 }
 
-// migrateFromList seeds two-slot fields from the legacy workspaces list when needed.
+// migrateFromList seeds two-slot fields from the legacy workspaces list exactly
+// once, when state written before the two-slot schema is first loaded.
 func (m *FocusMRU) migrateFromList() {
+	if m.Migrated {
+		return
+	}
+	m.Migrated = true
+	m.seedFromList()
+}
+
+func (m *FocusMRU) seedFromList() {
 	if m.WorkspaceCurrent == "" && len(m.Workspaces) > 0 {
 		m.WorkspaceCurrent = m.Workspaces[0]
 	}
@@ -131,9 +146,11 @@ func ObserveWorkspaceFocus(dir, workspaceID string) error {
 		return nil
 	}
 	return withFocusMRULock(dir, func(m *FocusMRU) error {
-		if m.SkipWorkspaceRecord {
-			m.SkipWorkspaceRecord = false
-			return nil
+		if skip := m.SkipWorkspaceID; skip != "" {
+			m.SkipWorkspaceID = ""
+			if skip == workspaceID {
+				return nil
+			}
 		}
 		if m.WorkspaceCurrent == workspaceID {
 			m.noteWorkspace(workspaceID)
@@ -165,18 +182,19 @@ func ObserveAgentFocus(dir string, ref AgentRef) error {
 	})
 }
 
-// PrepareAgentJump marks the next workspace focus observation to be ignored when
-// last-agent must change workspaces without updating the workspace pair.
-func PrepareAgentJump(dir string, crossWorkspace bool) error {
+// PrepareAgentJump marks a focus observation for workspaceID to be ignored when
+// last-agent must change workspaces without updating the workspace pair. An empty
+// workspaceID clears any pending suppression.
+func PrepareAgentJump(dir, workspaceID string) error {
 	return withFocusMRULock(dir, func(m *FocusMRU) error {
-		m.SkipWorkspaceRecord = crossWorkspace
+		m.SkipWorkspaceID = workspaceID
 		return nil
 	})
 }
 
 // ClearWorkspaceSkip drops a pending workspace-focus suppression flag.
 func ClearWorkspaceSkip(dir string) error {
-	return PrepareAgentJump(dir, false)
+	return PrepareAgentJump(dir, "")
 }
 
 // ClearWorkspace removes a closed workspace from toggle state and picker recency.
@@ -235,7 +253,6 @@ func WorkspaceToggleTarget(dir, currentWorkspaceID string) (string, bool, error)
 	if err != nil {
 		return "", false, err
 	}
-	m.migrateFromList()
 	target := m.WorkspaceLast
 	if target == "" {
 		return "", false, nil
@@ -257,20 +274,14 @@ func ConsumeWorkspaceToggle(dir, _, toID string) error {
 		return nil
 	}
 	return withFocusMRULock(dir, func(m *FocusMRU) error {
-		m.migrateFromList()
 		if m.WorkspaceCurrent == toID {
 			m.noteWorkspace(toID)
 			return nil
 		}
 		prev := m.WorkspaceCurrent
-		if m.WorkspaceLast == toID || prev == "" {
-			m.WorkspaceCurrent = toID
-			if prev != "" && prev != toID {
-				m.WorkspaceLast = prev
-			}
-		} else {
+		m.WorkspaceCurrent = toID
+		if prev != "" {
 			m.WorkspaceLast = prev
-			m.WorkspaceCurrent = toID
 		}
 		m.Workspaces = dedupeWorkspaces([]string{toID, prev}, m.Workspaces)
 		return nil
@@ -370,7 +381,7 @@ func LoadHistory(dir string) (History, error) {
 func SaveHistory(dir string, h History) error {
 	return withFocusMRULock(dir, func(m *FocusMRU) error {
 		m.Workspaces = append([]string(nil), h.Workspaces...)
-		m.migrateFromList()
+		m.seedFromList()
 		return nil
 	})
 }
@@ -388,7 +399,6 @@ func Last(dir string) (string, bool, error) {
 	if err != nil {
 		return "", false, err
 	}
-	m.migrateFromList()
 	if m.WorkspaceLast == "" {
 		return "", false, nil
 	}

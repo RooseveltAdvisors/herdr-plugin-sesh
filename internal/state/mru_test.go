@@ -163,7 +163,7 @@ func TestCrossWorkspaceAgentFocusPreservesExplicitWorkspaceMRU(t *testing.T) {
 	}
 
 	// last-agent style jump into another workspace must not rewrite workspace MRU.
-	if err := PrepareAgentJump(d, true); err != nil {
+	if err := PrepareAgentJump(d, "second-agent"); err != nil {
 		t.Fatal(err)
 	}
 	if err := ObserveWorkspaceFocus(d, "second-agent"); err != nil {
@@ -231,6 +231,72 @@ func TestUnavailableWorkspaceDestinationIsCleared(t *testing.T) {
 	}
 	if ok {
 		t.Fatal("expected no target after clearing unavailable destination")
+	}
+}
+
+func TestClearedWorkspaceLastIsNotResurrectedFromOlderHistory(t *testing.T) {
+	d := t.TempDir()
+	for _, id := range []string{"A", "B", "C"} {
+		if err := ObserveWorkspaceFocus(d, id); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := ClearWorkspaceLast(d, "B"); err != nil {
+		t.Fatal(err)
+	}
+	m, err := LoadFocusMRU(d)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if m.WorkspaceLast != "" {
+		t.Fatalf("workspace_last=%q want empty, older history must not be resurrected", m.WorkspaceLast)
+	}
+	if _, ok, err := WorkspaceToggleTarget(d, "C"); err != nil {
+		t.Fatal(err)
+	} else if ok {
+		t.Fatal("expected no target after clearing unavailable destination")
+	}
+}
+
+func TestClosedWorkspaceLastIsNotResurrectedFromOlderHistory(t *testing.T) {
+	d := t.TempDir()
+	for _, id := range []string{"A", "B", "C"} {
+		if err := ObserveWorkspaceFocus(d, id); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := ClearWorkspace(d, "B"); err != nil {
+		t.Fatal(err)
+	}
+	m, err := LoadFocusMRU(d)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if m.WorkspaceCurrent != "C" || m.WorkspaceLast != "" {
+		t.Fatalf("workspace pair current=%q last=%q", m.WorkspaceCurrent, m.WorkspaceLast)
+	}
+}
+
+func TestPendingAgentJumpSkipDoesNotSwallowUnrelatedFocus(t *testing.T) {
+	d := t.TempDir()
+	if err := ObserveWorkspaceFocus(d, "A"); err != nil {
+		t.Fatal(err)
+	}
+	if err := PrepareAgentJump(d, "never-focused"); err != nil {
+		t.Fatal(err)
+	}
+	if err := ObserveWorkspaceFocus(d, "B"); err != nil {
+		t.Fatal(err)
+	}
+	m, err := LoadFocusMRU(d)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if m.WorkspaceCurrent != "B" || m.WorkspaceLast != "A" {
+		t.Fatalf("workspace pair current=%q last=%q", m.WorkspaceCurrent, m.WorkspaceLast)
+	}
+	if m.SkipWorkspaceID != "" {
+		t.Fatalf("skip_workspace_id=%q want cleared after one observation", m.SkipWorkspaceID)
 	}
 }
 

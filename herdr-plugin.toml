@@ -1,7 +1,7 @@
 id = "RooseveltAdvisors.herdr-sesh"
 name = "Sesh for Herdr"
 version = "0.7.0"
-min_herdr_version = "0.7.0"
+min_herdr_version = "0.7.5"
 description = "Sesh-style smart workspace/session manager for Herdr"
 credit = "fullerzz/herdr-plugin-sesh"
 platforms = ["linux", "macos"]

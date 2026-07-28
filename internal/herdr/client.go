@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -149,6 +150,23 @@ func (c *CLIClient) run(ctx context.Context, args ...string) ([]byte, error) {
 		return out, fmt.Errorf("herdr %s: %w: %s", strings.Join(args, " "), err, strings.TrimSpace(string(stderr)))
 	}
 	return out, nil
+}
+
+// IsMissingTarget reports whether err is herdr rejecting an unknown target id,
+// as opposed to the CLI failing to run at all (missing binary, dead daemon,
+// cancelled context). Only the former means a saved destination is really gone.
+func IsMissingTarget(err error) bool {
+	var exitErr *exec.ExitError
+	if err == nil || !errors.As(err, &exitErr) {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	for _, marker := range []string{"not found", "no such", "unknown", "does not exist", "invalid id"} {
+		if strings.Contains(msg, marker) {
+			return true
+		}
+	}
+	return false
 }
 
 func responseJSON(out []byte, command string) (json.RawMessage, bool, error) {
