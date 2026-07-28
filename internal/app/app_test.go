@@ -366,13 +366,129 @@ func TestLastFocusesPreviousWorkspaceAndRotatesHistory(t *testing.T) {
 	if got := strings.TrimSpace(string(log)); got != "workspace focus previous" {
 		t.Fatalf("herdr args = %q", got)
 	}
+	m, err := state.LoadFocusMRU(stateDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if m.WorkspaceCurrent != "previous" || m.WorkspaceLast != "current" {
+		t.Fatalf("workspace pair current=%q last=%q", m.WorkspaceCurrent, m.WorkspaceLast)
+	}
 	h, err := state.LoadHistory(stateDir)
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := []string{"previous", "current", "older"}
-	if !reflect.DeepEqual(h.Workspaces, want) {
-		t.Fatalf("workspaces=%#v want %#v", h.Workspaces, want)
+	if len(h.Workspaces) < 2 || h.Workspaces[0] != "previous" || h.Workspaces[1] != "current" {
+		t.Fatalf("workspaces=%#v", h.Workspaces)
+	}
+}
+
+func TestLastAgentFocusesPreviousTab(t *testing.T) {
+	d := t.TempDir()
+	stateDir := filepath.Join(d, "state")
+	if err := state.ObserveAgentFocus(stateDir, state.AgentRef{WorkspaceID: "ws", TabID: "tab-a"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := state.ObserveAgentFocus(stateDir, state.AgentRef{WorkspaceID: "ws", TabID: "tab-b"}); err != nil {
+		t.Fatal(err)
+	}
+	fakeHerdr := filepath.Join(d, "herdr")
+	logPath := filepath.Join(d, "herdr.log")
+	script := "#!/bin/sh\nprintf '%s\n' \"$*\" > \"$HERDR_FAKE_LOG\"\n"
+	//nolint:gosec // test creates a local executable fixture.
+	if err := os.WriteFile(fakeHerdr, []byte(script), 0700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HERDR_BIN_PATH", fakeHerdr)
+	t.Setenv("HERDR_FAKE_LOG", logPath)
+	t.Setenv("HERDR_PLUGIN_STATE_DIR", stateDir)
+	t.Setenv("HERDR_WORKSPACE_ID", "ws")
+	t.Setenv("HERDR_TAB_ID", "tab-b")
+
+	a := &App{Out: &bytes.Buffer{}, Err: &bytes.Buffer{}}
+	if err := a.Run(context.Background(), []string{"last-agent"}); err != nil {
+		t.Fatal(err)
+	}
+	//nolint:gosec // logPath is a test-owned temp file.
+	log, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.TrimSpace(string(log)); got != "tab focus tab-a" {
+		t.Fatalf("herdr args = %q", got)
+	}
+	m, err := state.LoadFocusMRU(stateDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if m.AgentCurrent.TabID != "tab-a" || m.AgentLast.TabID != "tab-b" {
+		t.Fatalf("agent pair current=%#v last=%#v", m.AgentCurrent, m.AgentLast)
+	}
+}
+
+func TestLastClearsUnavailableWorkspaceDestination(t *testing.T) {
+	d := t.TempDir()
+	stateDir := filepath.Join(d, "state")
+	if err := state.ObserveWorkspaceFocus(stateDir, "current"); err != nil {
+		t.Fatal(err)
+	}
+	if err := state.ObserveWorkspaceFocus(stateDir, "missing"); err != nil {
+		t.Fatal(err)
+	}
+	if err := state.ObserveWorkspaceFocus(stateDir, "current"); err != nil {
+		t.Fatal(err)
+	}
+	fakeHerdr := filepath.Join(d, "herdr")
+	script := "#!/bin/sh\necho 'error: workspace not found: missing' >&2\nexit 1\n"
+	//nolint:gosec // test creates a local executable fixture.
+	if err := os.WriteFile(fakeHerdr, []byte(script), 0700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HERDR_BIN_PATH", fakeHerdr)
+	t.Setenv("HERDR_PLUGIN_STATE_DIR", stateDir)
+	t.Setenv("HERDR_WORKSPACE_ID", "current")
+
+	a := &App{Out: &bytes.Buffer{}, Err: &bytes.Buffer{}}
+	if err := a.Run(context.Background(), []string{"last"}); err == nil {
+		t.Fatal("expected focus failure")
+	}
+	m, err := state.LoadFocusMRU(stateDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if m.WorkspaceLast != "" {
+		t.Fatalf("workspace_last=%q want empty after unavailable clear", m.WorkspaceLast)
+	}
+}
+
+func TestLastKeepsDestinationWhenFocusFailsTransiently(t *testing.T) {
+	d := t.TempDir()
+	stateDir := filepath.Join(d, "state")
+	if err := state.ObserveWorkspaceFocus(stateDir, "previous"); err != nil {
+		t.Fatal(err)
+	}
+	if err := state.ObserveWorkspaceFocus(stateDir, "current"); err != nil {
+		t.Fatal(err)
+	}
+	fakeHerdr := filepath.Join(d, "herdr")
+	script := "#!/bin/sh\necho 'herdr daemon is not running' >&2\nexit 1\n"
+	//nolint:gosec // test creates a local executable fixture.
+	if err := os.WriteFile(fakeHerdr, []byte(script), 0700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HERDR_BIN_PATH", fakeHerdr)
+	t.Setenv("HERDR_PLUGIN_STATE_DIR", stateDir)
+	t.Setenv("HERDR_WORKSPACE_ID", "current")
+
+	a := &App{Out: &bytes.Buffer{}, Err: &bytes.Buffer{}}
+	if err := a.Run(context.Background(), []string{"last"}); err == nil {
+		t.Fatal("expected focus failure")
+	}
+	m, err := state.LoadFocusMRU(stateDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if m.WorkspaceLast != "previous" {
+		t.Fatalf("workspace_last=%q want previous preserved across transient failure", m.WorkspaceLast)
 	}
 }
 

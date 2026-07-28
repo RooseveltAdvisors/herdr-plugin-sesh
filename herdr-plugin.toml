@@ -1,7 +1,7 @@
 id = "RooseveltAdvisors.herdr-sesh"
 name = "Sesh for Herdr"
-version = "0.6.0"
-min_herdr_version = "0.7.0"
+version = "0.7.0"
+min_herdr_version = "0.7.5"
 description = "Sesh-style smart workspace/session manager for Herdr"
 credit = "fullerzz/herdr-plugin-sesh"
 platforms = ["linux", "macos"]
@@ -10,7 +10,7 @@ platforms = ["linux", "macos"]
 command = [
   "go",
   "build",
-  "-ldflags=-X=github.com/fullerzz/herdr-plugin-sesh/internal/app.Version=0.6.0",
+  "-ldflags=-X=github.com/fullerzz/herdr-plugin-sesh/internal/app.Version=0.7.0",
   "-o",
   "bin/",
   "./cmd/herdr-sesh",
@@ -27,6 +27,28 @@ id = "last"
 title = "Switch to Previous Workspace"
 contexts = ["workspace", "pane"]
 command = ["./bin/herdr-sesh", "last"]
+
+[[actions]]
+id = "last-agent"
+title = "Switch to Previous Agent/Tab"
+contexts = ["workspace", "pane"]
+command = ["./bin/herdr-sesh", "last-agent"]
+
+[[events]]
+on = "workspace.focused"
+command = ["./bin/herdr-sesh", "hook", "workspace.focused"]
+
+[[events]]
+on = "tab.focused"
+command = ["./bin/herdr-sesh", "hook", "tab.focused"]
+
+[[events]]
+on = "workspace.closed"
+command = ["./bin/herdr-sesh", "hook", "workspace.closed"]
+
+[[events]]
+on = "tab.closed"
+command = ["./bin/herdr-sesh", "hook", "tab.closed"]
 
 [[panes]]
 id = "picker"

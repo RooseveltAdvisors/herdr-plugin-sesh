@@ -53,6 +53,10 @@ func (a *App) Run(ctx context.Context, args []string) error {
 		return a.root(ctx, args[1:])
 	case "last":
 		return a.last(ctx, args[1:])
+	case "last-agent":
+		return a.lastAgent(ctx, args[1:])
+	case "hook":
+		return a.hook(ctx, args[1:])
 	case "window":
 		return a.window(ctx, args[1:])
 	case "plugin":
@@ -66,7 +70,7 @@ func (a *App) Run(ctx context.Context, args []string) error {
 	}
 }
 func (a *App) usage() error {
-	_, err := fmt.Fprintln(a.Out, "herdr-sesh list|connect|preview|clone|root|last|window|picker|plugin|config|--version")
+	_, err := fmt.Fprintln(a.Out, "herdr-sesh list|connect|preview|clone|root|last|last-agent|hook|window|picker|plugin|config|--version")
 	return err
 }
 
@@ -348,10 +352,7 @@ func gitRoot(ctx context.Context, dir string) (string, error) {
 func (a *App) last(ctx context.Context, _ []string) error {
 	stateDir := os.Getenv("HERDR_PLUGIN_STATE_DIR")
 	currentWorkspaceID := os.Getenv("HERDR_WORKSPACE_ID")
-	id, ok, err := state.Previous(stateDir, currentWorkspaceID)
-	if currentWorkspaceID == "" {
-		id, ok, err = state.Last(stateDir)
-	}
+	id, ok, err := state.WorkspaceToggleTarget(stateDir, currentWorkspaceID)
 	if err != nil {
 		return err
 	}
@@ -359,12 +360,124 @@ func (a *App) last(ctx context.Context, _ []string) error {
 		return errors.New("no previous workspace recorded")
 	}
 	if err := herdr.NewCLIClient().WorkspaceFocus(ctx, id); err != nil {
+		if herdr.IsMissingTarget(err) {
+			if clearErr := state.ClearWorkspaceLast(stateDir, id); clearErr != nil {
+				a.warnf("could not clear unavailable workspace: %v", clearErr)
+			}
+		}
 		return err
 	}
-	if err := state.RecordSwitch(stateDir, currentWorkspaceID, id); err != nil {
+	if err := state.ConsumeWorkspaceToggle(stateDir, currentWorkspaceID, id); err != nil {
 		a.warnf("could not record workspace history: %v", err)
 	}
 	return nil
+}
+
+func (a *App) lastAgent(ctx context.Context, _ []string) error {
+	stateDir := os.Getenv("HERDR_PLUGIN_STATE_DIR")
+	current := currentAgentRef()
+	target, ok, err := state.AgentToggleTarget(stateDir, current)
+	if err != nil {
+		return err
+	}
+	if !ok {
+		return errors.New("no previous agent/tab recorded")
+	}
+	if target.TabID == "" {
+		_ = state.ClearAgentLast(stateDir, target)
+		return errors.New("previous agent/tab is missing a tab id")
+	}
+	skipWorkspaceID := ""
+	if current.WorkspaceID != "" && target.WorkspaceID != "" && current.WorkspaceID != target.WorkspaceID {
+		skipWorkspaceID = target.WorkspaceID
+	}
+	if err := state.PrepareAgentJump(stateDir, skipWorkspaceID); err != nil {
+		a.warnf("could not prepare agent jump: %v", err)
+	}
+	if err := herdr.NewCLIClient().TabFocus(ctx, target.TabID); err != nil {
+		if herdr.IsMissingTarget(err) {
+			if clearErr := state.ClearAgentLast(stateDir, target); clearErr != nil {
+				a.warnf("could not clear unavailable agent/tab: %v", clearErr)
+			}
+		}
+		if clearSkipErr := state.ClearWorkspaceSkip(stateDir); clearSkipErr != nil {
+			a.warnf("could not clear workspace skip: %v", clearSkipErr)
+		}
+		return err
+	}
+	if err := state.ConsumeAgentToggle(stateDir, current, target); err != nil {
+		a.warnf("could not record agent history: %v", err)
+	}
+	return nil
+}
+
+func currentAgentRef() state.AgentRef {
+	return state.AgentRef{
+		WorkspaceID: os.Getenv("HERDR_WORKSPACE_ID"),
+		TabID:       os.Getenv("HERDR_TAB_ID"),
+		PaneID:      os.Getenv("HERDR_PANE_ID"),
+	}
+}
+
+func (a *App) hook(_ context.Context, args []string) error {
+	if len(args) < 1 {
+		return errors.New("hook requires event name")
+	}
+	stateDir := os.Getenv("HERDR_PLUGIN_STATE_DIR")
+	switch args[0] {
+	case "workspace-focused", "workspace.focused":
+		return state.ObserveWorkspaceFocus(stateDir, firstNonEmpty(os.Getenv("HERDR_WORKSPACE_ID"), eventWorkspaceID()))
+	case "tab-focused", "tab.focused":
+		return state.ObserveAgentFocus(stateDir, state.AgentRef{
+			WorkspaceID: firstNonEmpty(os.Getenv("HERDR_WORKSPACE_ID"), eventWorkspaceID()),
+			TabID:       firstNonEmpty(os.Getenv("HERDR_TAB_ID"), eventTabID()),
+			PaneID:      os.Getenv("HERDR_PANE_ID"),
+		})
+	case "workspace-closed", "workspace.closed":
+		return state.ClearWorkspace(stateDir, firstNonEmpty(eventWorkspaceID(), os.Getenv("HERDR_WORKSPACE_ID")))
+	case "tab-closed", "tab.closed":
+		return state.ClearAgent(stateDir, state.AgentRef{
+			WorkspaceID: firstNonEmpty(eventWorkspaceID(), os.Getenv("HERDR_WORKSPACE_ID")),
+			TabID:       firstNonEmpty(eventTabID(), os.Getenv("HERDR_TAB_ID")),
+		})
+	default:
+		return fmt.Errorf("unknown hook event %q", args[0])
+	}
+}
+
+func eventWorkspaceID() string {
+	return eventStringField("workspace_id")
+}
+
+func eventTabID() string {
+	return eventStringField("tab_id")
+}
+
+func eventStringField(key string) string {
+	raw := os.Getenv("HERDR_PLUGIN_EVENT_JSON")
+	if raw == "" {
+		return ""
+	}
+	var env struct {
+		Data map[string]any `json:"data"`
+	}
+	if err := json.Unmarshal([]byte(raw), &env); err != nil {
+		return ""
+	}
+	if env.Data == nil {
+		return ""
+	}
+	v, _ := env.Data[key].(string)
+	return v
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, v := range values {
+		if v != "" {
+			return v
+		}
+	}
+	return ""
 }
 
 func (a *App) recordWorkspaceSwitch(fromWorkspaceID, toWorkspaceID string) {

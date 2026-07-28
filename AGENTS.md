@@ -45,3 +45,12 @@ Pull requests should include a short description, linked issue when applicable, 
 ## Release & Configuration Notes
 
 Release tags must start with `v` and match `version` in `herdr-plugin.toml`. Configuration lookup order is documented in `README.md`; preserve compatibility with Sesh-style TOML and existing `testdata/sesh.toml` fixtures.
+
+`last` and `last-agent` are strict two-target toggles. Authoritative focus observation comes from plugin event hooks (`workspace.focused` / `tab.focused`) in `herdr-plugin.toml`; pair state lives in `internal/state` (`FocusMRU`). Do not replace this with an N-item history cycle. Agent/tab and workspace pairs must stay orthogonal (see `PrepareAgentJump`).
+
+## Maintaining this file
+
+Keep this file for knowledge useful to almost every future agent session in this project.
+Do not repeat what the codebase already shows; point to the authoritative file or command instead.
+Prefer rewriting or pruning existing entries over appending new ones.
+When updating this file, preserve this bar for all agents and keep entries concise.

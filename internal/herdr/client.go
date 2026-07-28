@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -146,9 +147,56 @@ func (c *CLIClient) run(ctx context.Context, args ...string) ([]byte, error) {
 	defer cancel()
 	out, stderr, err := c.Runner.Run(ctx, c.Bin, args...)
 	if err != nil {
-		return out, fmt.Errorf("herdr %s: %w: %s", strings.Join(args, " "), err, strings.TrimSpace(string(stderr)))
+		return out, &CommandError{Args: append([]string(nil), args...), Stderr: strings.TrimSpace(string(stderr)), Err: err}
 	}
 	return out, nil
+}
+
+// CommandError is a failed herdr CLI invocation. It keeps stderr separate from the
+// formatted message so callers can classify a failure without parsing argv back out.
+type CommandError struct {
+	Args   []string
+	Stderr string
+	Err    error
+}
+
+func (e *CommandError) Error() string {
+	return fmt.Sprintf("herdr %s: %v: %s", strings.Join(e.Args, " "), e.Err, e.Stderr)
+}
+
+func (e *CommandError) Unwrap() error { return e.Err }
+
+// missingTargetMarkers are the herdr 0.7.5 unknown-id signals, matched against
+// stderr only. They stay narrow on purpose: broad markers such as "unknown" or a
+// bare "not found" also match usage errors and a shell's own "command not found".
+var missingTargetMarkers = []string{
+	"workspace_not_found",
+	"tab_not_found",
+	"pane_not_found",
+	"workspace not found",
+	"tab not found",
+	"pane not found",
+}
+
+// IsMissingTarget reports whether err is herdr rejecting an unknown target id,
+// as opposed to the CLI failing to run at all (missing binary, dead daemon,
+// cancelled context). Only the former means a saved destination is really gone.
+func IsMissingTarget(err error) bool {
+	var cmdErr *CommandError
+	if !errors.As(err, &cmdErr) {
+		return false
+	}
+	var exitErr *exec.ExitError
+	if !errors.As(cmdErr.Err, &exitErr) {
+		return false
+	}
+	stderr := strings.ToLower(cmdErr.Stderr)
+	for _, marker := range missingTargetMarkers {
+		if strings.Contains(stderr, marker) {
+			return true
+		}
+	}
+	return false
 }
 
 func responseJSON(out []byte, command string) (json.RawMessage, bool, error) {
