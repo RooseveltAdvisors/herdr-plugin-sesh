@@ -3,6 +3,7 @@ package herdr
 import (
 	"context"
 	"errors"
+	"os/exec"
 	"reflect"
 	"strings"
 	"testing"
@@ -156,5 +157,65 @@ func TestCLIClientIncludesStderrOnCommandFailure(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "boom") {
 		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func exitStatusError(t *testing.T) error {
+	t.Helper()
+	err := exec.Command("sh", "-c", "exit 1").Run()
+	var exitErr *exec.ExitError
+	if !errors.As(err, &exitErr) {
+		t.Fatalf("fixture error = %v, want *exec.ExitError", err)
+	}
+	return err
+}
+
+func TestIsMissingTargetClassifiesFocusFailures(t *testing.T) {
+	exitErr := exitStatusError(t)
+	cases := []struct {
+		name   string
+		stderr string
+		err    error
+		want   bool
+	}{
+		{name: "unknown workspace", stderr: "error: workspace not found: w7", err: exitErr, want: true},
+		{name: "unknown tab", stderr: "Error: Tab not found", err: exitErr, want: true},
+		{name: "structured code", stderr: `{"error":{"code":"pane_not_found"}}`, err: exitErr, want: true},
+		{name: "daemon down", stderr: "error: could not connect to the herdr daemon", err: exitErr, want: false},
+		{name: "wrapper without binary", stderr: "sh: 1: herdr: command not found", err: exitErr, want: false},
+		{name: "usage error", stderr: "error: unknown flag --nope", err: exitErr, want: false},
+		{name: "binary missing from path", stderr: "", err: &exec.Error{Name: "herdr", Err: exec.ErrNotFound}, want: false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			c := &CLIClient{Bin: "/bin/herdr", Runner: fixedRunner{stderr: []byte(tc.stderr), err: tc.err}}
+			err := c.WorkspaceFocus(context.Background(), "w7")
+			if err == nil {
+				t.Fatal("expected focus error")
+			}
+			if got := IsMissingTarget(err); got != tc.want {
+				t.Fatalf("IsMissingTarget=%v want %v for %v", got, tc.want, err)
+			}
+		})
+	}
+}
+
+func TestIsMissingTargetIgnoresCommandArguments(t *testing.T) {
+	c := &CLIClient{Bin: "/bin/herdr", Runner: fixedRunner{stderr: []byte("error: daemon unavailable"), err: exitStatusError(t)}}
+	err := c.WorkspaceFocus(context.Background(), "tab_not_found")
+	if err == nil {
+		t.Fatal("expected focus error")
+	}
+	if IsMissingTarget(err) {
+		t.Fatalf("argv must not be classified as a missing target: %v", err)
+	}
+}
+
+func TestIsMissingTargetRejectsUnrelatedErrors(t *testing.T) {
+	if IsMissingTarget(nil) {
+		t.Fatal("nil error is not a missing target")
+	}
+	if IsMissingTarget(errors.New("workspace not found")) {
+		t.Fatal("a bare error is not a herdr command failure")
 	}
 }

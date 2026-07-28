@@ -438,7 +438,7 @@ func TestLastClearsUnavailableWorkspaceDestination(t *testing.T) {
 		t.Fatal(err)
 	}
 	fakeHerdr := filepath.Join(d, "herdr")
-	script := "#!/bin/sh\necho 'not found' >&2\nexit 1\n"
+	script := "#!/bin/sh\necho 'error: workspace not found: missing' >&2\nexit 1\n"
 	//nolint:gosec // test creates a local executable fixture.
 	if err := os.WriteFile(fakeHerdr, []byte(script), 0700); err != nil {
 		t.Fatal(err)

@@ -378,6 +378,10 @@ func LoadHistory(dir string) (History, error) {
 	return History{Workspaces: append([]string(nil), m.Workspaces...)}, nil
 }
 
+// SaveHistory replaces the picker recency list wholesale and seeds the two-slot
+// pair from it. It has no production caller: the picker path only reads through
+// LoadHistory. Because the seed bypasses the one-shot Migrated gate, any new
+// caller must not run it after a destination has been deliberately cleared.
 func SaveHistory(dir string, h History) error {
 	return withFocusMRULock(dir, func(m *FocusMRU) error {
 		m.Workspaces = append([]string(nil), h.Workspaces...)
