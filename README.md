@@ -73,8 +73,8 @@ herdr plugin pane open \
   --placement overlay
 ```
 
-See [Keybindings](docs/keybindings.md) to bind the picker and previous-workspace
-actions in your Herdr configuration.
+See [Keybindings](docs/keybindings.md) to bind the picker, previous-workspace
+(`last`), and previous-agent/tab (`last-agent`) two-target toggles.
 
 ## Configuration
 
@@ -111,7 +111,8 @@ The plugin binary also exposes its underlying operations directly:
 | `herdr-sesh preview TARGET` | Render the configured preview for a session. |
 | `herdr-sesh clone REPOSITORY` | Clone a repository and connect to its workspace. |
 | `herdr-sesh root --connect` | Connect to the current Git repository root. |
-| `herdr-sesh last` | Focus the previously used workspace. |
+| `herdr-sesh last` | Toggle the previous workspace (strict two-target). |
+| `herdr-sesh last-agent` | Toggle the previous agent/tab (strict two-target). |
 | `herdr-sesh window [PATH]` | List tabs or create one for a path. |
 | `herdr-sesh config path` | Print the resolved plugin config path. |
 | `herdr-sesh config init` | Create a starter config if one does not exist. |

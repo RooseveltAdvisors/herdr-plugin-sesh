@@ -1,3 +1,14 @@
+## v0.7.0 (2026-07-28)
+
+### 🚀 Features
+
+- Add strict two-target `last` workspace toggle and `last-agent` tab toggle with focus event hooks
+
+### 🐛 Bug Fixes
+
+- Keep workspace and agent/tab MRU pairs orthogonal across manual focus changes
+
+
 ## v0.6.0 (2026-07-23)
 
 ### 🚀 Features
