@@ -18,7 +18,8 @@ tabs.
   directory.
 - Apply startup commands, previews, and named Herdr tabs to new workspaces.
 - Filter, sort, deduplicate, and optionally cache session results.
-- Jump directly to the previously focused workspace.
+- Toggle between the current and previously selected workspace (`last`) or
+  agent/tab (`last-agent`) as strict two-target switches.
 - Clone a Git repository and connect to it in one command.
 - Use the built-in picker by default or opt into the experimental fzf picker.
 

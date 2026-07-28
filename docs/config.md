@@ -14,8 +14,8 @@ For a linked Herdr plugin, create or inspect the plugin-owned config with:
 
 ```bash
 just install-plugin
-HERDR_PLUGIN_CONFIG_DIR="$(herdr plugin config-dir fullerzz.sesh)" ./bin/herdr-sesh config init
-HERDR_PLUGIN_CONFIG_DIR="$(herdr plugin config-dir fullerzz.sesh)" ./bin/herdr-sesh config path
+HERDR_PLUGIN_CONFIG_DIR="$(herdr plugin config-dir RooseveltAdvisors.herdr-sesh)" ./bin/herdr-sesh config init
+HERDR_PLUGIN_CONFIG_DIR="$(herdr plugin config-dir RooseveltAdvisors.herdr-sesh)" ./bin/herdr-sesh config path
 ```
 
 Herdr creates `HERDR_PLUGIN_CONFIG_DIR` and `HERDR_PLUGIN_STATE_DIR` for the

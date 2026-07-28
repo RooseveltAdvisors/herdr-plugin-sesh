@@ -120,11 +120,12 @@ func withFocusMRULock(dir string, fn func(*FocusMRU) error) error {
 		return err
 	}
 	lockPath := filepath.Join(dir, "history.lock")
+	//nolint:gosec // lockPath is the fixed lock file inside the plugin-owned state dir.
 	lockFile, err := os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR, 0600)
 	if err != nil {
 		return err
 	}
-	defer lockFile.Close()
+	defer func() { _ = lockFile.Close() }()
 	if err := syscall.Flock(int(lockFile.Fd()), syscall.LOCK_EX); err != nil {
 		return err
 	}
