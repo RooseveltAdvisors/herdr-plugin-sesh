@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -128,7 +129,7 @@ func (a *App) list(ctx context.Context, args []string) error {
 	}
 	cacheable := cfg.Cache && !*blacklisted && *hideDup
 	if cacheable {
-		if cached, ok, err := state.LoadSessionCache(os.Getenv("HERDR_PLUGIN_STATE_DIR"), resolvedConfigPath, 5*time.Second, time.Now()); err != nil {
+		if cached, ok, err := state.LoadSessionCache(pluginStateDir(), resolvedConfigPath, 5*time.Second, time.Now()); err != nil {
 			a.warnf("ignoring session cache: %v", err)
 		} else if ok {
 			return a.printSessions(cached, *jsonOut)
@@ -141,7 +142,7 @@ func (a *App) list(ctx context.Context, args []string) error {
 	sources.ApplyConfig(&ss, cfg, "")
 	sessions := ss.Ordered()
 	if cacheable {
-		if err := state.SaveSessionCache(os.Getenv("HERDR_PLUGIN_STATE_DIR"), resolvedConfigPath, sessions, time.Now()); err != nil {
+		if err := state.SaveSessionCache(pluginStateDir(), resolvedConfigPath, sessions, time.Now()); err != nil {
 			a.warnf("could not save session cache: %v", err)
 		}
 	}
@@ -202,11 +203,11 @@ func (a *App) picker(ctx context.Context, args []string) error {
 		selected, ok, err = pickerpkg.RunFZF(ctx, sessions, pickOpts)
 	} else {
 		client := herdr.NewCLIClient()
-		history, historyErr := state.LoadHistory(os.Getenv("HERDR_PLUGIN_STATE_DIR"))
+		history, historyErr := state.LoadHistory(pluginStateDir())
 		if historyErr != nil {
 			a.warnf("ignoring workspace history: %v", historyErr)
 		}
-		pickOpts.RecentWorkspaceIDs = append([]string{os.Getenv("HERDR_WORKSPACE_ID")}, history.Workspaces...)
+		pickOpts.RecentWorkspaceIDs = append([]string{currentWorkspaceID()}, history.Workspaces...)
 		pickOpts.RecentWorkspaceSort = cfg.TUI.DefaultSort == "recent"
 		pickOpts.RefreshAgentStatuses = func() (map[string]string, error) {
 			workspaces, err := client.WorkspaceList(ctx)
@@ -224,14 +225,14 @@ func (a *App) picker(ctx context.Context, args []string) error {
 	if err != nil || !ok {
 		return err
 	}
-	currentWorkspaceID := os.Getenv("HERDR_WORKSPACE_ID")
+	fromWorkspaceID := currentWorkspaceID()
 	res, err := connectpkg.Connect(ctx, herdr.NewCLIClient(), []model.Session{selected}, pickerTarget(selected), connectpkg.Options{
 		Namer: func(ctx context.Context, p string) string { return namer.Namer{}.Name(ctx, p, cfg.DirLength) },
 	})
 	if err != nil {
 		return err
 	}
-	a.recordWorkspaceSwitch(currentWorkspaceID, res.Session.WorkspaceID)
+	a.recordWorkspaceSwitch(fromWorkspaceID, res.Session.WorkspaceID)
 	return nil
 }
 
@@ -265,13 +266,13 @@ func (a *App) connect(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	currentWorkspaceID := os.Getenv("HERDR_WORKSPACE_ID")
+	fromWorkspaceID := currentWorkspaceID()
 	res, err := connectpkg.Connect(ctx, herdr.NewCLIClient(), sessions, target, connectpkg.Options{NoFocus: *noFocus, Namer: func(ctx context.Context, p string) string { return namer.Namer{}.Name(ctx, p, cfg.DirLength) }})
 	if err != nil {
 		return err
 	}
 	if !*noFocus {
-		a.recordWorkspaceSwitch(currentWorkspaceID, res.Session.WorkspaceID)
+		a.recordWorkspaceSwitch(fromWorkspaceID, res.Session.WorkspaceID)
 	}
 	_, err = fmt.Fprintf(a.Out, "%s\n", res.Session.Name)
 	return err
@@ -350,8 +351,8 @@ func gitRoot(ctx context.Context, dir string) (string, error) {
 	return strings.TrimSpace(string(b)), nil
 }
 func (a *App) last(ctx context.Context, _ []string) error {
-	stateDir := os.Getenv("HERDR_PLUGIN_STATE_DIR")
-	currentWorkspaceID := os.Getenv("HERDR_WORKSPACE_ID")
+	stateDir := pluginStateDir()
+	currentWorkspaceID := currentWorkspaceID()
 	id, ok, err := state.WorkspaceToggleTarget(stateDir, currentWorkspaceID)
 	if err != nil {
 		return err
@@ -374,7 +375,7 @@ func (a *App) last(ctx context.Context, _ []string) error {
 }
 
 func (a *App) lastAgent(ctx context.Context, _ []string) error {
-	stateDir := os.Getenv("HERDR_PLUGIN_STATE_DIR")
+	stateDir := pluginStateDir()
 	current := currentAgentRef()
 	target, ok, err := state.AgentToggleTarget(stateDir, current)
 	if err != nil {
@@ -411,11 +412,17 @@ func (a *App) lastAgent(ctx context.Context, _ []string) error {
 	return nil
 }
 
+func currentWorkspaceID() string {
+	ctx := pluginContext()
+	return firstNonEmpty(os.Getenv("HERDR_WORKSPACE_ID"), ctx.WorkspaceID)
+}
+
 func currentAgentRef() state.AgentRef {
+	ctx := pluginContext()
 	return state.AgentRef{
-		WorkspaceID: os.Getenv("HERDR_WORKSPACE_ID"),
-		TabID:       os.Getenv("HERDR_TAB_ID"),
-		PaneID:      os.Getenv("HERDR_PANE_ID"),
+		WorkspaceID: firstNonEmpty(os.Getenv("HERDR_WORKSPACE_ID"), ctx.WorkspaceID),
+		TabID:       firstNonEmpty(os.Getenv("HERDR_TAB_ID"), ctx.TabID),
+		PaneID:      firstNonEmpty(os.Getenv("HERDR_PANE_ID"), ctx.FocusedPaneID),
 	}
 }
 
@@ -423,26 +430,66 @@ func (a *App) hook(_ context.Context, args []string) error {
 	if len(args) < 1 {
 		return errors.New("hook requires event name")
 	}
-	stateDir := os.Getenv("HERDR_PLUGIN_STATE_DIR")
+	stateDir := pluginStateDir()
 	switch args[0] {
 	case "workspace-focused", "workspace.focused":
-		return state.ObserveWorkspaceFocus(stateDir, firstNonEmpty(os.Getenv("HERDR_WORKSPACE_ID"), eventWorkspaceID()))
+		// Event payload is authoritative for the newly focused target. Ambient
+		// HERDR_* / context can lag behind during rapid focus changes or when a
+		// non-default session shares process env with another Herdr instance.
+		return state.ObserveWorkspaceFocus(stateDir, firstNonEmpty(eventWorkspaceID(), currentWorkspaceID()))
 	case "tab-focused", "tab.focused":
+		ctx := pluginContext()
 		return state.ObserveAgentFocus(stateDir, state.AgentRef{
-			WorkspaceID: firstNonEmpty(os.Getenv("HERDR_WORKSPACE_ID"), eventWorkspaceID()),
-			TabID:       firstNonEmpty(os.Getenv("HERDR_TAB_ID"), eventTabID()),
-			PaneID:      os.Getenv("HERDR_PANE_ID"),
+			WorkspaceID: firstNonEmpty(eventWorkspaceID(), os.Getenv("HERDR_WORKSPACE_ID"), ctx.WorkspaceID),
+			TabID:       firstNonEmpty(eventTabID(), os.Getenv("HERDR_TAB_ID"), ctx.TabID),
+			PaneID:      firstNonEmpty(eventPaneID(), os.Getenv("HERDR_PANE_ID"), ctx.FocusedPaneID),
 		})
 	case "workspace-closed", "workspace.closed":
-		return state.ClearWorkspace(stateDir, firstNonEmpty(eventWorkspaceID(), os.Getenv("HERDR_WORKSPACE_ID")))
+		return state.ClearWorkspace(stateDir, firstNonEmpty(eventWorkspaceID(), currentWorkspaceID()))
 	case "tab-closed", "tab.closed":
+		ctx := pluginContext()
 		return state.ClearAgent(stateDir, state.AgentRef{
-			WorkspaceID: firstNonEmpty(eventWorkspaceID(), os.Getenv("HERDR_WORKSPACE_ID")),
-			TabID:       firstNonEmpty(eventTabID(), os.Getenv("HERDR_TAB_ID")),
+			WorkspaceID: firstNonEmpty(eventWorkspaceID(), os.Getenv("HERDR_WORKSPACE_ID"), ctx.WorkspaceID),
+			TabID:       firstNonEmpty(eventTabID(), os.Getenv("HERDR_TAB_ID"), ctx.TabID),
 		})
 	default:
 		return fmt.Errorf("unknown hook event %q", args[0])
 	}
+}
+
+// pluginStateDir returns the per-Herdr-session state directory.
+//
+// Herdr gives every session the same HERDR_PLUGIN_STATE_DIR, but workspace and
+// tab ids are only unique within a session (both default and a lab session mint
+// w1/w2/...). Scoping by HERDR_SESSION keeps last/last-agent pairs orthogonal
+// across concurrent sessions and stops lab traffic from poisoning the captain
+// default pair.
+func pluginStateDir() string {
+	base := os.Getenv("HERDR_PLUGIN_STATE_DIR")
+	if base == "" {
+		return ""
+	}
+	session := strings.TrimSpace(os.Getenv("HERDR_SESSION"))
+	if session == "" || session == "default" {
+		return base
+	}
+	return filepath.Join(base, "sessions", hex.EncodeToString([]byte(session)))
+}
+
+type pluginInvocationContext struct {
+	WorkspaceID   string `json:"workspace_id"`
+	TabID         string `json:"tab_id"`
+	FocusedPaneID string `json:"focused_pane_id"`
+}
+
+func pluginContext() pluginInvocationContext {
+	var ctx pluginInvocationContext
+	raw := os.Getenv("HERDR_PLUGIN_CONTEXT_JSON")
+	if raw == "" {
+		return ctx
+	}
+	_ = json.Unmarshal([]byte(raw), &ctx)
+	return ctx
 }
 
 func eventWorkspaceID() string {
@@ -451,6 +498,10 @@ func eventWorkspaceID() string {
 
 func eventTabID() string {
 	return eventStringField("tab_id")
+}
+
+func eventPaneID() string {
+	return firstNonEmpty(eventStringField("pane_id"), eventStringField("focused_pane_id"))
 }
 
 func eventStringField(key string) string {
@@ -481,7 +532,7 @@ func firstNonEmpty(values ...string) string {
 }
 
 func (a *App) recordWorkspaceSwitch(fromWorkspaceID, toWorkspaceID string) {
-	if err := state.RecordSwitch(os.Getenv("HERDR_PLUGIN_STATE_DIR"), fromWorkspaceID, toWorkspaceID); err != nil {
+	if err := state.RecordSwitch(pluginStateDir(), fromWorkspaceID, toWorkspaceID); err != nil {
 		a.warnf("could not record workspace history: %v", err)
 	}
 }
@@ -489,7 +540,7 @@ func (a *App) recordWorkspaceSwitch(fromWorkspaceID, toWorkspaceID string) {
 func (a *App) window(ctx context.Context, args []string) error {
 	c := herdr.NewCLIClient()
 	if len(args) == 0 {
-		tabs, err := c.TabList(ctx, os.Getenv("HERDR_WORKSPACE_ID"))
+		tabs, err := c.TabList(ctx, currentWorkspaceID())
 		if err != nil {
 			return err
 		}
@@ -500,7 +551,7 @@ func (a *App) window(ctx context.Context, args []string) error {
 		}
 		return nil
 	}
-	_, err := c.TabCreate(ctx, herdr.TabCreateRequest{WorkspaceID: os.Getenv("HERDR_WORKSPACE_ID"), CWD: args[0], Label: filepath.Base(args[0]), Focus: true})
+	_, err := c.TabCreate(ctx, herdr.TabCreateRequest{WorkspaceID: currentWorkspaceID(), CWD: args[0], Label: filepath.Base(args[0]), Focus: true})
 	return err
 }
 func (a *App) plugin(ctx context.Context, args []string) error {

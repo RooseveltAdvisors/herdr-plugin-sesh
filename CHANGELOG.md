@@ -1,3 +1,9 @@
+## [Unreleased]
+
+### Fixed
+
+- Prefer live focus event payloads over ambient `HERDR_*` when recording `last` / `last-agent` pairs, scope plugin state per `HERDR_SESSION`, and document RooseveltAdvisors action bindings (stock `previous_tab` cycles; stale `fullerzz.sesh.last` fails)
+
 ## v0.7.0 (2026-07-28)
 
 ### 🚀 Features

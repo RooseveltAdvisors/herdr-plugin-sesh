@@ -245,7 +245,7 @@ jobs:
             echo "## Install Plugin"
             echo
             echo '```bash'
-            echo "herdr plugin install fullerzz/herdr-plugin-sesh --ref ${tag}"
+            echo "herdr plugin install RooseveltAdvisors/herdr-plugin-sesh --ref ${tag}"
             echo '```'
             echo
             echo "Version: ${version}"

@@ -46,7 +46,7 @@ Pull requests should include a short description, linked issue when applicable, 
 
 Release tags must start with `v` and match `version` in `herdr-plugin.toml`. Configuration lookup order is documented in `README.md`; preserve compatibility with Sesh-style TOML and existing `testdata/sesh.toml` fixtures.
 
-`last` and `last-agent` are strict two-target toggles. Authoritative focus observation comes from plugin event hooks (`workspace.focused` / `tab.focused`) in `herdr-plugin.toml`; pair state lives in `internal/state` (`FocusMRU`). Do not replace this with an N-item history cycle. Agent/tab and workspace pairs must stay orthogonal (see `PrepareAgentJump`).
+`last` and `last-agent` are strict two-target toggles. Authoritative focus observation comes from plugin event hooks (`workspace.focused` / `tab.focused`) in `herdr-plugin.toml` — prefer `HERDR_PLUGIN_EVENT_JSON` over ambient `HERDR_*` for the focused target. Pair state lives in `internal/state` (`FocusMRU`) under a per-`HERDR_SESSION` subdirectory of `HERDR_PLUGIN_STATE_DIR` (default session keeps the root). Do not replace this with an N-item history cycle. Agent/tab and workspace pairs must stay orthogonal (see `PrepareAgentJump`).
 
 ## Maintaining this file
 

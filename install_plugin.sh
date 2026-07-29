@@ -11,4 +11,4 @@ if [ -z "$version" ]; then
   exit 1
 fi
 
-exec herdr plugin install fullerzz/herdr-plugin-sesh --ref "v$version" --yes
+exec herdr plugin install RooseveltAdvisors/herdr-plugin-sesh --ref "v$version" --yes
