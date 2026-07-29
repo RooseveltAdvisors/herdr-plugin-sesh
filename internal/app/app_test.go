@@ -662,10 +662,22 @@ func TestPluginStateDirScopesNonDefaultSessions(t *testing.T) {
 
 	// Lab/non-default sessions must not share history.json with default: both mint w1/w2 ids.
 	t.Setenv("HERDR_SESSION", "fm-lab-herdr-sesh-toggl-1")
-	want := filepath.Join(baseState, "sessions", "fm-lab-herdr-sesh-toggl-1")
+	want := filepath.Join(baseState, "sessions", "666d2d6c61622d68657264722d736573682d746f67676c2d31")
 	if got := pluginStateDir(); got != want {
 		t.Fatalf("lab state dir=%q want %q", got, want)
 	}
+	t.Setenv("HERDR_SESSION", "lab:a")
+	colonDir := pluginStateDir()
+	t.Setenv("HERDR_SESSION", "lab_a")
+	underscoreDir := pluginStateDir()
+	if colonDir == underscoreDir {
+		t.Fatalf("distinct sessions share state dir %q", colonDir)
+	}
+	t.Setenv("HERDR_SESSION", "..")
+	if got := pluginStateDir(); filepath.Dir(got) != filepath.Join(baseState, "sessions") {
+		t.Fatalf("session state escaped sessions dir: %q", got)
+	}
+	t.Setenv("HERDR_SESSION", "fm-lab-herdr-sesh-toggl-1")
 
 	a := &App{Out: &bytes.Buffer{}, Err: &bytes.Buffer{}}
 	t.Setenv("HERDR_PLUGIN_EVENT_JSON", `{"event":"workspace_focused","data":{"type":"workspace_focused","workspace_id":"w2"}}`)

@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -472,24 +473,7 @@ func pluginStateDir() string {
 	if session == "" || session == "default" {
 		return base
 	}
-	safe := sanitizeSessionSegment(session)
-	if safe == "" {
-		return base
-	}
-	return filepath.Join(base, "sessions", safe)
-}
-
-func sanitizeSessionSegment(session string) string {
-	var b strings.Builder
-	for _, r := range session {
-		switch {
-		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9', r == '-', r == '_', r == '.':
-			b.WriteRune(r)
-		default:
-			b.WriteByte('_')
-		}
-	}
-	return b.String()
+	return filepath.Join(base, "sessions", hex.EncodeToString([]byte(session)))
 }
 
 type pluginInvocationContext struct {
