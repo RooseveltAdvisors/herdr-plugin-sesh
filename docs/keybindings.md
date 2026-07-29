@@ -1,8 +1,8 @@
 # Keybindings
 
 Prerequisite: build and link this checkout, or install a published release with
-`herdr plugin install fullerzz/herdr-plugin-sesh --ref <release-tag>` using a
-tag from the [GitHub releases](https://github.com/fullerzz/herdr-plugin-sesh/releases)
+`herdr plugin install RooseveltAdvisors/herdr-plugin-sesh --ref <release-tag>` using a
+tag from the [GitHub releases](https://github.com/RooseveltAdvisors/herdr-plugin-sesh/releases)
 page.
 
 Example Herdr keybinding once the plugin is linked:
@@ -34,6 +34,11 @@ type = "plugin_action"
 command = "RooseveltAdvisors.herdr-sesh.last"
 description = "toggle previous workspace"
 ```
+
+Bindings must use the `RooseveltAdvisors.herdr-sesh.*` action ids (not
+`fullerzz.sesh.*`, and not stock `previous_tab` / `previous_workspace`).
+Stock `previous_tab` is an N-item cycle; `fullerzz.sesh.last` fails with
+`custom command failed` when only this fork is installed.
 
 `last` and `last-agent` are strict two-target toggles (tmux-style). They alternate
 only between the current target and the immediately previously selected target.

@@ -52,6 +52,7 @@ func TestListIgnoresCorruptSessionCache(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Setenv("HERDR_PLUGIN_STATE_DIR", stateDir)
+	t.Setenv("HERDR_SESSION", "")
 
 	var out, errb bytes.Buffer
 	a := &App{Out: &out, Err: &errb}
@@ -77,6 +78,7 @@ func TestListWarnsWhenSessionCacheCannotBeSaved(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Setenv("HERDR_PLUGIN_STATE_DIR", statePath)
+	t.Setenv("HERDR_SESSION", "")
 
 	var out, errb bytes.Buffer
 	a := &App{Out: &out, Err: &errb}
@@ -108,6 +110,7 @@ path = "/tmp/scratch"
 		t.Fatal(err)
 	}
 	t.Setenv("HERDR_PLUGIN_STATE_DIR", filepath.Join(d, "state"))
+	t.Setenv("HERDR_SESSION", "")
 
 	if got := runListJSON(t, cfgPath, ""); len(got) != 1 || got[0].Name != "api" {
 		t.Fatalf("normal sessions = %#v", got)
@@ -130,6 +133,7 @@ path = "/configured/api"
 		t.Fatal(err)
 	}
 	t.Setenv("HERDR_PLUGIN_STATE_DIR", filepath.Join(d, "state"))
+	t.Setenv("HERDR_SESSION", "")
 	zoxideOutput := "42 /discovered/api\n"
 
 	if got := runListJSON(t, cfgPath, zoxideOutput); len(got) != 1 {
@@ -151,6 +155,7 @@ func TestListCacheDoesNotCrossConfigFiles(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Setenv("HERDR_PLUGIN_STATE_DIR", filepath.Join(d, "state"))
+	t.Setenv("HERDR_SESSION", "")
 
 	if got := runListJSON(t, firstConfig, ""); len(got) != 1 || got[0].Name != "api" {
 		t.Fatalf("first config sessions = %#v", got)
@@ -174,6 +179,7 @@ func TestListCacheDistinguishesRelativeConfigsAcrossWorkingDirectories(t *testin
 		}
 	}
 	t.Setenv("HERDR_PLUGIN_STATE_DIR", filepath.Join(d, "state"))
+	t.Setenv("HERDR_SESSION", "")
 
 	t.Chdir(firstDir)
 	if got := runListJSON(t, "sesh.toml", ""); len(got) != 1 || got[0].Name != "api" {
@@ -352,6 +358,7 @@ func TestLastFocusesPreviousWorkspaceAndRotatesHistory(t *testing.T) {
 	t.Setenv("HERDR_BIN_PATH", fakeHerdr)
 	t.Setenv("HERDR_FAKE_LOG", logPath)
 	t.Setenv("HERDR_PLUGIN_STATE_DIR", stateDir)
+	t.Setenv("HERDR_SESSION", "")
 	t.Setenv("HERDR_WORKSPACE_ID", "current")
 
 	a := &App{Out: &bytes.Buffer{}, Err: &bytes.Buffer{}}
@@ -401,6 +408,7 @@ func TestLastAgentFocusesPreviousTab(t *testing.T) {
 	t.Setenv("HERDR_BIN_PATH", fakeHerdr)
 	t.Setenv("HERDR_FAKE_LOG", logPath)
 	t.Setenv("HERDR_PLUGIN_STATE_DIR", stateDir)
+	t.Setenv("HERDR_SESSION", "")
 	t.Setenv("HERDR_WORKSPACE_ID", "ws")
 	t.Setenv("HERDR_TAB_ID", "tab-b")
 
@@ -445,6 +453,7 @@ func TestLastClearsUnavailableWorkspaceDestination(t *testing.T) {
 	}
 	t.Setenv("HERDR_BIN_PATH", fakeHerdr)
 	t.Setenv("HERDR_PLUGIN_STATE_DIR", stateDir)
+	t.Setenv("HERDR_SESSION", "")
 	t.Setenv("HERDR_WORKSPACE_ID", "current")
 
 	a := &App{Out: &bytes.Buffer{}, Err: &bytes.Buffer{}}
@@ -477,6 +486,7 @@ func TestLastKeepsDestinationWhenFocusFailsTransiently(t *testing.T) {
 	}
 	t.Setenv("HERDR_BIN_PATH", fakeHerdr)
 	t.Setenv("HERDR_PLUGIN_STATE_DIR", stateDir)
+	t.Setenv("HERDR_SESSION", "")
 	t.Setenv("HERDR_WORKSPACE_ID", "current")
 
 	a := &App{Out: &bytes.Buffer{}, Err: &bytes.Buffer{}}
@@ -489,6 +499,185 @@ func TestLastKeepsDestinationWhenFocusFailsTransiently(t *testing.T) {
 	}
 	if m.WorkspaceLast != "previous" {
 		t.Fatalf("workspace_last=%q want previous preserved across transient failure", m.WorkspaceLast)
+	}
+}
+
+func TestHookPrefersLiveEventPayloadOverStaleAmbientEnv(t *testing.T) {
+	d := t.TempDir()
+	stateDir := filepath.Join(d, "state")
+	t.Setenv("HERDR_PLUGIN_STATE_DIR", stateDir)
+	t.Setenv("HERDR_SESSION", "")
+	// Ambient env still points at the previous focus; stock Herdr 0.7.5 event JSON
+	// carries the newly focused ids (captured from a live plugin hook).
+	t.Setenv("HERDR_WORKSPACE_ID", "stale-ws")
+	t.Setenv("HERDR_TAB_ID", "stale-tab")
+	t.Setenv("HERDR_PANE_ID", "stale-pane")
+	t.Setenv("HERDR_PLUGIN_EVENT_JSON", `{"event":"workspace_focused","data":{"type":"workspace_focused","workspace_id":"w2"}}`)
+
+	a := &App{Out: &bytes.Buffer{}, Err: &bytes.Buffer{}}
+	if err := a.Run(context.Background(), []string{"hook", "workspace.focused"}); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HERDR_PLUGIN_EVENT_JSON", `{"event":"tab_focused","data":{"type":"tab_focused","tab_id":"w2:t1","workspace_id":"w2"}}`)
+	if err := a.Run(context.Background(), []string{"hook", "tab.focused"}); err != nil {
+		t.Fatal(err)
+	}
+
+	m, err := state.LoadFocusMRU(stateDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if m.WorkspaceCurrent != "w2" {
+		t.Fatalf("workspace_current=%q want event payload w2, not ambient stale-ws", m.WorkspaceCurrent)
+	}
+	if m.AgentCurrent.TabID != "w2:t1" || m.AgentCurrent.WorkspaceID != "w2" {
+		t.Fatalf("agent_current=%#v want event payload", m.AgentCurrent)
+	}
+}
+
+func TestHookActionPathTogglesExactlyTwoTargets(t *testing.T) {
+	d := t.TempDir()
+	baseState := filepath.Join(d, "state")
+	fakeHerdr := filepath.Join(d, "herdr")
+	focusLog := filepath.Join(d, "focus.log")
+	script := "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$HERDR_FAKE_LOG\"\n"
+	//nolint:gosec // test creates a local executable fixture.
+	if err := os.WriteFile(fakeHerdr, []byte(script), 0700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HERDR_BIN_PATH", fakeHerdr)
+	t.Setenv("HERDR_FAKE_LOG", focusLog)
+	t.Setenv("HERDR_PLUGIN_STATE_DIR", baseState)
+	t.Setenv("HERDR_SESSION", "") // default session keeps state at the plugin root
+
+	a := &App{Out: &bytes.Buffer{}, Err: &bytes.Buffer{}}
+	runHook := func(event, eventJSON, workspaceID, tabID, paneID string) {
+		t.Helper()
+		t.Setenv("HERDR_PLUGIN_EVENT", event)
+		t.Setenv("HERDR_PLUGIN_EVENT_JSON", eventJSON)
+		t.Setenv("HERDR_WORKSPACE_ID", workspaceID)
+		t.Setenv("HERDR_TAB_ID", tabID)
+		t.Setenv("HERDR_PANE_ID", paneID)
+		t.Setenv("HERDR_PLUGIN_CONTEXT_JSON", fmt.Sprintf(
+			`{"workspace_id":%q,"tab_id":%q,"focused_pane_id":%q,"invocation_source":"api","correlation_id":%q}`,
+			workspaceID, tabID, paneID, event,
+		))
+		if err := a.Run(context.Background(), []string{"hook", event}); err != nil {
+			t.Fatalf("hook %s: %v", event, err)
+		}
+	}
+
+	// Visit three workspaces and three tabs the way stock Herdr delivers focus events.
+	runHook("workspace.focused", `{"event":"workspace_focused","data":{"type":"workspace_focused","workspace_id":"w1"}}`, "w1", "w1:t1", "w1:p1")
+	runHook("tab.focused", `{"event":"tab_focused","data":{"type":"tab_focused","tab_id":"w1:t1","workspace_id":"w1"}}`, "w1", "w1:t1", "w1:p1")
+	runHook("workspace.focused", `{"event":"workspace_focused","data":{"type":"workspace_focused","workspace_id":"w2"}}`, "w2", "w2:t1", "w2:p1")
+	runHook("tab.focused", `{"event":"tab_focused","data":{"type":"tab_focused","tab_id":"w2:t1","workspace_id":"w2"}}`, "w2", "w2:t1", "w2:p1")
+	runHook("workspace.focused", `{"event":"workspace_focused","data":{"type":"workspace_focused","workspace_id":"w3"}}`, "w3", "w3:t1", "w3:p1")
+	runHook("tab.focused", `{"event":"tab_focused","data":{"type":"tab_focused","tab_id":"w3:t1","workspace_id":"w3"}}`, "w3", "w3:t1", "w3:p1")
+	runHook("tab.focused", `{"event":"tab_focused","data":{"type":"tab_focused","tab_id":"w3:t2","workspace_id":"w3"}}`, "w3", "w3:t2", "w3:p2")
+	runHook("tab.focused", `{"event":"tab_focused","data":{"type":"tab_focused","tab_id":"w3:t3","workspace_id":"w3"}}`, "w3", "w3:t3", "w3:p3")
+
+	// Clear event env so actions look like keybound plugin_action invocations.
+	t.Setenv("HERDR_PLUGIN_EVENT", "")
+	t.Setenv("HERDR_PLUGIN_EVENT_JSON", "")
+	t.Setenv("HERDR_WORKSPACE_ID", "w3")
+	t.Setenv("HERDR_TAB_ID", "w3:t3")
+	t.Setenv("HERDR_PANE_ID", "w3:p3")
+	t.Setenv("HERDR_PLUGIN_CONTEXT_JSON", `{"workspace_id":"w3","tab_id":"w3:t3","focused_pane_id":"w3:p3","invocation_source":"keybinding"}`)
+	t.Setenv("HERDR_PLUGIN_ACTION_ID", "last")
+
+	for i := 0; i < 4; i++ {
+		if err := a.Run(context.Background(), []string{"last"}); err != nil {
+			t.Fatalf("last #%d: %v", i+1, err)
+		}
+		m, err := state.LoadFocusMRU(baseState)
+		if err != nil {
+			t.Fatal(err)
+		}
+		wantCurrent, wantLast := "w2", "w3"
+		if i%2 == 1 {
+			wantCurrent, wantLast = "w3", "w2"
+		}
+		if m.WorkspaceCurrent != wantCurrent || m.WorkspaceLast != wantLast {
+			t.Fatalf("last #%d pair current=%q last=%q want %q/%q (must not resurrect w1)", i+1, m.WorkspaceCurrent, m.WorkspaceLast, wantCurrent, wantLast)
+		}
+		t.Setenv("HERDR_WORKSPACE_ID", m.WorkspaceCurrent)
+	}
+
+	// Re-sync ambient env to the agent pair after workspace toggles.
+	m, err := state.LoadFocusMRU(baseState)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HERDR_WORKSPACE_ID", m.AgentCurrent.WorkspaceID)
+	t.Setenv("HERDR_TAB_ID", m.AgentCurrent.TabID)
+	t.Setenv("HERDR_PANE_ID", m.AgentCurrent.PaneID)
+	t.Setenv("HERDR_PLUGIN_ACTION_ID", "last-agent")
+
+	for i := 0; i < 4; i++ {
+		if err := a.Run(context.Background(), []string{"last-agent"}); err != nil {
+			t.Fatalf("last-agent #%d: %v", i+1, err)
+		}
+		m, err := state.LoadFocusMRU(baseState)
+		if err != nil {
+			t.Fatal(err)
+		}
+		wantCurrent, wantLast := "w3:t2", "w3:t3"
+		if i%2 == 1 {
+			wantCurrent, wantLast = "w3:t3", "w3:t2"
+		}
+		if m.AgentCurrent.TabID != wantCurrent || m.AgentLast.TabID != wantLast {
+			t.Fatalf("last-agent #%d pair current=%q last=%q want %q/%q (must not resurrect w3:t1)", i+1, m.AgentCurrent.TabID, m.AgentLast.TabID, wantCurrent, wantLast)
+		}
+		t.Setenv("HERDR_TAB_ID", m.AgentCurrent.TabID)
+		t.Setenv("HERDR_PANE_ID", m.AgentCurrent.PaneID)
+		t.Setenv("HERDR_WORKSPACE_ID", m.AgentCurrent.WorkspaceID)
+	}
+
+	//nolint:gosec // focusLog is a test-owned temp file.
+	log, err := os.ReadFile(focusLog)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lines := strings.Split(strings.TrimSpace(string(log)), "\n")
+	if len(lines) != 8 {
+		t.Fatalf("focus calls=%d want 8 (4 workspace + 4 agent)\n%s", len(lines), log)
+	}
+}
+
+func TestPluginStateDirScopesNonDefaultSessions(t *testing.T) {
+	d := t.TempDir()
+	baseState := filepath.Join(d, "state")
+	t.Setenv("HERDR_PLUGIN_STATE_DIR", baseState)
+
+	// Default session keeps the herdr-managed root (compat with existing installs).
+	t.Setenv("HERDR_SESSION", "default")
+	if got := pluginStateDir(); got != baseState {
+		t.Fatalf("default state dir=%q want %q", got, baseState)
+	}
+	t.Setenv("HERDR_SESSION", "")
+	if got := pluginStateDir(); got != baseState {
+		t.Fatalf("empty session state dir=%q want %q", got, baseState)
+	}
+
+	// Lab/non-default sessions must not share history.json with default: both mint w1/w2 ids.
+	t.Setenv("HERDR_SESSION", "fm-lab-herdr-sesh-toggl-1")
+	want := filepath.Join(baseState, "sessions", "fm-lab-herdr-sesh-toggl-1")
+	if got := pluginStateDir(); got != want {
+		t.Fatalf("lab state dir=%q want %q", got, want)
+	}
+
+	a := &App{Out: &bytes.Buffer{}, Err: &bytes.Buffer{}}
+	t.Setenv("HERDR_PLUGIN_EVENT_JSON", `{"event":"workspace_focused","data":{"type":"workspace_focused","workspace_id":"w2"}}`)
+	t.Setenv("HERDR_WORKSPACE_ID", "w2")
+	if err := a.Run(context.Background(), []string{"hook", "workspace.focused"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(baseState, "history.json")); !os.IsNotExist(err) {
+		t.Fatalf("default root history should stay untouched, err=%v", err)
+	}
+	if _, err := os.Stat(filepath.Join(want, "history.json")); err != nil {
+		t.Fatalf("lab session history missing: %v", err)
 	}
 }
 

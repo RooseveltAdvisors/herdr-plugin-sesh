@@ -46,7 +46,7 @@ if ! grep -Fq 'cp README.md LICENSE herdr-plugin.toml "dist/work/${name}/"' "$wo
   echo 'release archives must include the plugin manifest' >&2
   exit 1
 fi
-if ! grep -Fq 'echo "herdr plugin install fullerzz/herdr-plugin-sesh --ref ${tag}"' "$workflow"; then
+if ! grep -Fq 'echo "herdr plugin install RooseveltAdvisors/herdr-plugin-sesh --ref ${tag}"' "$workflow"; then
   echo 'generated install instructions must pin the release tag' >&2
   exit 1
 fi
@@ -78,7 +78,7 @@ if [ "$("$repo_root/bin/herdr-sesh" --version)" != "herdr-sesh ${manifest_versio
   exit 1
 fi
 install_command=$(cd "$tmp" && PATH="$fake_bin:$PATH" "$repo_root/install_plugin.sh")
-expected_install="plugin install fullerzz/herdr-plugin-sesh --ref v${manifest_version} --yes"
+expected_install="plugin install RooseveltAdvisors/herdr-plugin-sesh --ref v${manifest_version} --yes"
 if [ "$install_command" != "$expected_install" ]; then
   echo "installer must pin the manifest release: got $install_command" >&2
   exit 1
