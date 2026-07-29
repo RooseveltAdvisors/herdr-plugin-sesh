@@ -20,13 +20,15 @@ HERDR_PLUGIN_CONFIG_DIR="$(herdr plugin config-dir RooseveltAdvisors.herdr-sesh)
 
 Herdr creates `HERDR_PLUGIN_CONFIG_DIR` and `HERDR_PLUGIN_STATE_DIR` for the
 plugin. Keep user configuration in the config directory and runtime state in
-the state directory.
+the state directory. Runtime state for non-default `HERDR_SESSION` values is
+kept in a session-specific subdirectory; the default session continues to use
+the state directory root.
 
 ## Top-level fields
 
 | Field | Runtime effect |
 | --- | --- |
-| `cache` | Caches normal deduplicated `list` results for five seconds in `HERDR_PLUGIN_STATE_DIR`, scoped to the resolved config file. It does not cache `list --blacklisted`, `list --hide-duplicates=false`, `picker`, or `connect`. |
+| `cache` | Caches normal deduplicated `list` results for five seconds in the current session's plugin state directory, scoped to the resolved config file. It does not cache `list --blacklisted`, `list --hide-duplicates=false`, `picker`, or `connect`. |
 | `strict_mode` | Rejects unknown fields in this file and its imported files. Without strict mode, unknown fields are ignored. |
 | `import` | Loads additional TOML files before the current file. Relative paths are resolved from the importing file; `~/` is expanded. |
 | `blacklist` | Treats each value as a regular expression matched against session names. Normal listings hide matches; `list --blacklisted` shows them. |
