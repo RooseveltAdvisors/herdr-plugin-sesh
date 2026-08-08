@@ -399,6 +399,11 @@ func RecordSwitch(dir, fromWorkspaceID, toWorkspaceID string) error {
 	return ConsumeWorkspaceToggle(dir, fromWorkspaceID, toWorkspaceID)
 }
 
+// RemoveWorkspace removes a closed workspace from toggle state and picker recency.
+func RemoveWorkspace(dir, workspaceID string) error {
+	return ClearWorkspace(dir, workspaceID)
+}
+
 func Last(dir string) (string, bool, error) {
 	m, err := LoadFocusMRU(dir)
 	if err != nil {

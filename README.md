@@ -33,7 +33,7 @@ Sesh concepts map onto Herdr as follows:
 
 ## Requirements
 
-- [Herdr](https://herdr.dev/docs/installation/) 0.7.5 or newer (plugin focus event hooks)
+- [Herdr](https://herdr.dev/docs/installation/) 0.8.0 or newer (plugin focus event hooks and workspace picker actions)
 - Linux or macOS
 - Git and Go 1.26.4 or newer for Herdr's source-based plugin installation
 - Optional: `zoxide` for directory history and `eza` for the default preview
