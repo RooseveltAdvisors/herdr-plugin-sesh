@@ -71,7 +71,7 @@ func TestTeaModelCtrlJKMovesSelection(t *testing.T) {
 	if current, ok := m.list.Current(); !ok || current.Name != "api" {
 		t.Fatalf("current = %#v ok=%v, want api", current, ok)
 	}
-	if view := ansi.Strip(m.View().Content); !strings.Contains(view, "enter select · ctrl+j/k move · ctrl+x close · ctrl+r workspace · esc exit") {
+	if view := ansi.Strip(m.View().Content); !strings.Contains(view, "enter · ctrl+j/k move · ctrl+x close · ctrl+r workspace · ctrl+u clear · esc") {
 		t.Fatalf("default-width view missing complete navigation help:\n%s", view)
 	}
 }

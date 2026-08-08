@@ -608,7 +608,14 @@ func (m teaModel) View() tea.View {
 	if m.recentSort {
 		sortMode = "recent"
 	}
-	footer := helpStyle.Render(fmt.Sprintf("enter select · ctrl+j/k move · ctrl+x close · ctrl+r %s · esc exit", sortMode))
+	footerText := fmt.Sprintf("enter select · ctrl+j/k move · ctrl+x close · ctrl+r %s · ctrl+u clear · esc exit", sortMode)
+	if lipgloss.Width(footerText) > width {
+		footerText = fmt.Sprintf("enter · ctrl+j/k move · ctrl+x close · ctrl+r %s · ctrl+u clear · esc", sortMode)
+	}
+	if lipgloss.Width(footerText) > width {
+		footerText = "enter · ctrl+j/k · ctrl+x close · ctrl+r sort · ctrl+u clear · esc"
+	}
+	footer := helpStyle.Render(footerText)
 	if m.closeError != "" {
 		footer = emptyStyle.Render(m.closeError)
 	}
