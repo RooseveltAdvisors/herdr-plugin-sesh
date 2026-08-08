@@ -16,6 +16,7 @@ tabs.
   from a native terminal picker.
 - Focus an existing workspace or create one from a configured session or
   directory.
+- Close active Herdr workspaces directly from the native picker.
 - Apply startup commands, previews, and named Herdr tabs to new workspaces.
 - Filter, sort, deduplicate, and optionally cache session results.
 - Toggle between the current and previously selected workspace (`last`) or
