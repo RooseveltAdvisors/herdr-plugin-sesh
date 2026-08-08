@@ -88,7 +88,16 @@ func (a *App) loadConfig(path string) (config.Config, error) {
 }
 func (a *App) collect(ctx context.Context, cfg config.Config, target string) ([]model.Session, error) {
 	hs := sources.HerdrWorkspaces{Client: herdr.NewCLIClient()}
-	srcs := []sources.Source{ignoreSource{hs}, sources.ConfigSessions{Config: cfg}, sources.Zoxide{}}
+	return a.collectFrom(ctx, cfg, target, hs)
+}
+
+func (a *App) collectAllowUnavailableHerdr(ctx context.Context, cfg config.Config, target string) ([]model.Session, error) {
+	hs := sources.HerdrWorkspaces{Client: herdr.NewCLIClient()}
+	return a.collectFrom(ctx, cfg, target, ignoreSource{hs})
+}
+
+func (a *App) collectFrom(ctx context.Context, cfg config.Config, target string, herdrSource sources.Source) ([]model.Session, error) {
+	srcs := []sources.Source{herdrSource, sources.ConfigSessions{Config: cfg}, sources.Zoxide{}}
 	if target != "" {
 		srcs = append(srcs, sources.DirectPath{
 			Path:  target,
@@ -182,7 +191,7 @@ func (a *App) picker(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	sessions, err := a.collect(ctx, cfg, "")
+	sessions, err := a.collectAllowUnavailableHerdr(ctx, cfg, "")
 	if err != nil {
 		return err
 	}
@@ -190,6 +199,7 @@ func (a *App) picker(ctx context.Context, args []string) error {
 		return a.printSessions(sessions, true)
 	}
 	pickOpts := pickerpkg.Options{
+		Context:               ctx,
 		Output:                a.Out,
 		Prompt:                cfg.TUI.Prompt,
 		Placeholder:           cfg.TUI.Placeholder,
@@ -199,6 +209,8 @@ func (a *App) picker(ctx context.Context, args []string) error {
 	}
 	var selected model.Session
 	var ok bool
+	currentID := currentWorkspaceID()
+	currentWorkspaceClosed := false
 	if *fzfPicker || strings.EqualFold(os.Getenv("HERDR_SESH_PICKER"), "fzf") {
 		selected, ok, err = pickerpkg.RunFZF(ctx, sessions, pickOpts)
 	} else {
@@ -209,6 +221,19 @@ func (a *App) picker(ctx context.Context, args []string) error {
 		}
 		pickOpts.RecentWorkspaceIDs = append([]string{currentWorkspaceID()}, history.Workspaces...)
 		pickOpts.RecentWorkspaceSort = cfg.TUI.DefaultSort == "recent"
+		pickOpts.CloseWorkspace = func(closeCtx context.Context, id string) error {
+			if err := client.WorkspaceClose(closeCtx, id); err != nil {
+				return err
+			}
+			currentWorkspaceClosed = currentWorkspaceClosed || id == currentID
+			if err := state.RemoveWorkspace(pluginStateDir(), id); err != nil {
+				a.warnf("could not prune workspace history: %v", err)
+			}
+			return nil
+		}
+		pickOpts.ReloadSessions = func(reloadCtx context.Context) ([]model.Session, error) {
+			return a.collect(reloadCtx, cfg, "")
+		}
 		pickOpts.RefreshAgentStatuses = func() (map[string]string, error) {
 			workspaces, err := client.WorkspaceList(ctx)
 			if err != nil {
@@ -225,15 +250,21 @@ func (a *App) picker(ctx context.Context, args []string) error {
 	if err != nil || !ok {
 		return err
 	}
-	fromWorkspaceID := currentWorkspaceID()
 	res, err := connectpkg.Connect(ctx, herdr.NewCLIClient(), []model.Session{selected}, pickerTarget(selected), connectpkg.Options{
 		Namer: func(ctx context.Context, p string) string { return namer.Namer{}.Name(ctx, p, cfg.DirLength) },
 	})
 	if err != nil {
 		return err
 	}
-	a.recordWorkspaceSwitch(fromWorkspaceID, res.Session.WorkspaceID)
+	a.recordWorkspaceSwitch(pickerSwitchSource(currentID, currentWorkspaceClosed), res.Session.WorkspaceID)
 	return nil
+}
+
+func pickerSwitchSource(currentWorkspaceID string, currentWorkspaceClosed bool) string {
+	if currentWorkspaceClosed {
+		return ""
+	}
+	return currentWorkspaceID
 }
 
 func pickerTarget(s model.Session) string {
@@ -262,7 +293,7 @@ func (a *App) connect(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	sessions, err := a.collect(ctx, cfg, target)
+	sessions, err := a.collectAllowUnavailableHerdr(ctx, cfg, target)
 	if err != nil {
 		return err
 	}
@@ -293,7 +324,7 @@ func (a *App) preview(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	sessions, err := a.collect(ctx, cfg, target)
+	sessions, err := a.collectAllowUnavailableHerdr(ctx, cfg, target)
 	if err != nil {
 		return err
 	}

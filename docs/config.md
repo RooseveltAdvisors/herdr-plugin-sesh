@@ -47,6 +47,12 @@ the state directory root.
 | `placeholder` | Replaces the picker placeholder. An empty value uses `Filter workspaces`. |
 | `default_sort` | Sets the native picker's initial Herdr workspace order to `workspace` (Herdr's order, the default) or `recent` (most recently visited first). Press `ctrl+r` to switch modes while the picker is open. |
 
+Native picker controls include `ctrl+j`/`ctrl+k` to move the selection, `ctrl+r`
+to switch workspace sorting, and `ctrl+x` to close the selected Herdr
+workspace. The close action is ignored for non-Herdr entries. Press `esc` or
+`ctrl+c` while a close is pending to cancel it and exit after the command
+returns.
+
 Set `HERDR_SESH_SMEAR_PRESET` to choose the cursor animation:
 
 | Preset | Effect |

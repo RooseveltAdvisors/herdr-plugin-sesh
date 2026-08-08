@@ -16,6 +16,7 @@ tabs.
   from a native terminal picker.
 - Focus an existing workspace or create one from a configured session or
   directory.
+- Close active Herdr workspaces directly from the native picker.
 - Apply startup commands, previews, and named Herdr tabs to new workspaces.
 - Filter, sort, deduplicate, and optionally cache session results.
 - Toggle between the current and previously selected workspace (`last`) or
@@ -33,7 +34,7 @@ Sesh concepts map onto Herdr as follows:
 
 ## Requirements
 
-- [Herdr](https://herdr.dev/docs/installation/) 0.7.5 or newer (plugin focus event hooks)
+- [Herdr](https://herdr.dev/docs/installation/) 0.8.0 or newer (plugin focus event hooks and workspace picker actions)
 - Linux or macOS
 - Git and Go 1.26.4 or newer for Herdr's source-based plugin installation
 - Optional: `zoxide` for directory history and `eza` for the default preview

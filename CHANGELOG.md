@@ -14,6 +14,14 @@
 
 - Keep workspace and agent/tab MRU pairs orthogonal across manual focus changes
 
+- **picker**: Close Herdr workspaces ([#66](https://github.com/fullerzz/herdr-plugin-sesh/issues/66)) ([3a5e57f](https://github.com/fullerzz/herdr-plugin-sesh/commit/3a5e57ff3dd97c00de4b04546603d99d6a7253ea))
+
+- **deps**: Update mise tools ([#55](https://github.com/fullerzz/herdr-plugin-sesh/issues/55)) ([c1c889d](https://github.com/fullerzz/herdr-plugin-sesh/commit/c1c889dab955d54c9e3953d61fde4ce86cf758c0))
+
+- Configure Amp orb lifecycle ([#67](https://github.com/fullerzz/herdr-plugin-sesh/issues/67)) ([42e702a](https://github.com/fullerzz/herdr-plugin-sesh/commit/42e702ab0ca8469e148249f497bc903ff31d43d3))
+
+- **ci-deps**: Update ci dependencies ([#63](https://github.com/fullerzz/herdr-plugin-sesh/issues/63)) ([c505632](https://github.com/fullerzz/herdr-plugin-sesh/commit/c505632cd5729229d1399e57e171d5c28425f0c6))
+
 
 ## v0.6.0 (2026-07-23)
 
@@ -320,5 +328,4 @@
 - Bind releases to requested tag commit ([#26](https://github.com/fullerzz/herdr-plugin-sesh/issues/26)) ([d1c43c1](https://github.com/fullerzz/herdr-plugin-sesh/commit/d1c43c1b99615e2bc64ad971916e6e44cdf9e802))
 
 - Add git-cliff changelog generation to release workflow ([#28](https://github.com/fullerzz/herdr-plugin-sesh/issues/28)) ([20c118e](https://github.com/fullerzz/herdr-plugin-sesh/commit/20c118efb185164ff6137009701bb9709739f291))
-
 
