@@ -130,6 +130,7 @@ type CLIClient struct {
 }
 
 func executable(path string) bool {
+	//nolint:gosec // HERDR_BIN_PATH is intentionally validated as a user-selected path.
 	info, err := os.Stat(path)
 	return err == nil && info.Mode().IsRegular() && info.Mode().Perm()&0111 != 0
 }
