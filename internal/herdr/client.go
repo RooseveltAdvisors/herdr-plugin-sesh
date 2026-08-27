@@ -129,10 +129,19 @@ type CLIClient struct {
 	Timeout time.Duration
 }
 
+func executable(path string) bool {
+	//nolint:gosec // HERDR_BIN_PATH is intentionally validated as a user-selected path.
+	info, err := os.Stat(path)
+	return err == nil && info.Mode().IsRegular() && info.Mode().Perm()&0111 != 0
+}
+
 func NewCLIClient() *CLIClient {
 	bin := os.Getenv("HERDR_BIN_PATH")
-	if bin == "" {
+	if !executable(bin) {
 		bin = "herdr"
+		if resolved, err := exec.LookPath(bin); err == nil {
+			bin = resolved
+		}
 	}
 	return &CLIClient{Bin: bin, Runner: ExecRunner{}, Timeout: 10 * time.Second}
 }

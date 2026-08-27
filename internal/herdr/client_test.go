@@ -3,7 +3,9 @@ package herdr
 import (
 	"context"
 	"errors"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
@@ -15,6 +17,47 @@ func (r *recRunner) Run(_ context.Context, bin string, args ...string) ([]byte, 
 	r.calls = append(r.calls, append([]string{bin}, args...))
 	return []byte(`{"id":"ws1","label":"api","cwd":"/tmp/api"}`), nil, nil
 }
+
+func fakeHerdr(t *testing.T) (string, string) {
+	t.Helper()
+	fakeBin := t.TempDir()
+	fakeHerdr := filepath.Join(fakeBin, "herdr")
+	//nolint:gosec // test creates a local executable fixture.
+	if err := os.WriteFile(fakeHerdr, []byte("#!/bin/sh\nexit 0\n"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	return fakeBin, fakeHerdr
+}
+
+func TestNewCLIClientFallsBackFromStaleBinPath(t *testing.T) {
+	fakeBin, fakeHerdr := fakeHerdr(t)
+	t.Setenv("HERDR_BIN_PATH", filepath.Join(t.TempDir(), "deleted-herdr"))
+	t.Setenv("PATH", fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	if got := NewCLIClient().Bin; got != fakeHerdr {
+		t.Fatalf("bin = %q, want %q", got, fakeHerdr)
+	}
+}
+
+func TestNewCLIClientFallsBackFromEmptyBinPath(t *testing.T) {
+	fakeBin, fakeHerdr := fakeHerdr(t)
+	t.Setenv("HERDR_BIN_PATH", "")
+	t.Setenv("PATH", fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	if got := NewCLIClient().Bin; got != fakeHerdr {
+		t.Fatalf("bin = %q, want %q", got, fakeHerdr)
+	}
+}
+
+func TestNewCLIClientHonorsValidBinPath(t *testing.T) {
+	_, fakeHerdr := fakeHerdr(t)
+	t.Setenv("HERDR_BIN_PATH", fakeHerdr)
+
+	if got := NewCLIClient().Bin; got != fakeHerdr {
+		t.Fatalf("bin = %q, want %q", got, fakeHerdr)
+	}
+}
+
 func TestCLIClientConstructsWorkspaceCreate(t *testing.T) {
 	rr := &recRunner{}
 	c := &CLIClient{Bin: "/bin/herdr", Runner: rr}
