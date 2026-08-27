@@ -26,6 +26,10 @@ This repository is a Go CLI plugin for Herdr named `herdr-sesh`.
 
 CI should run formatting, vet, tests, build, and CLI smoke checks; mirror those checks before opening a pull request. Prefer `just` recipes so local checks use pinned tools.
 
+The canonical local gate is `just check` (lint, formatting, race-enabled tests,
+and release-ref validation), followed by `just build`, the version smoke check,
+and the fixture-backed `list --json` smoke check.
+
 ## Coding Style & Naming Conventions
 
 Use idiomatic Go formatting and short, lowercase package names. Keep command orchestration in `internal/app` and reusable logic in narrow `internal/*` packages. Prefer table tests only when they reduce repetition. Use `xh` instead of `curl` and `uv` when Python is needed.
@@ -42,11 +46,22 @@ Recent commits use Conventional Commit-style subjects, for example `feat: cache 
 
 Pull requests should include a short description, linked issue when applicable, and the exact validation commands run. Include CLI output or screenshots only when changing user-visible command behavior.
 
+When syncing `upstream/main`, fetch `origin` and `upstream` first, merge the
+upstream default branch into a feature branch, and land that sync PR with a
+merge commit; do not squash or rebase it.
+
 ## Release & Configuration Notes
 
 Release tags must start with `v` and match `version` in `herdr-plugin.toml`. Configuration lookup order is documented in `README.md`; preserve compatibility with Sesh-style TOML and existing `testdata/sesh.toml` fixtures.
 
-`last` and `last-agent` are strict two-target toggles. Authoritative focus observation comes from plugin event hooks (`workspace.focused` / `tab.focused`) in `herdr-plugin.toml` — prefer `HERDR_PLUGIN_EVENT_JSON` over ambient `HERDR_*` for the focused target. Pair state lives in `internal/state` (`FocusMRU`) under a per-`HERDR_SESSION` subdirectory of `HERDR_PLUGIN_STATE_DIR` (default session keeps the root). Do not replace this with an N-item history cycle. Agent/tab and workspace pairs must stay orthogonal (see `PrepareAgentJump`).
+`last` and `last-agent` are strict two-target toggles. Authoritative focus observation comes from plugin event hooks (`workspace.focused` / `tab.focused`) in `herdr-plugin.toml` — prefer `HERDR_PLUGIN_EVENT_JSON` over ambient `HERDR_*` for the focused target. Pair state lives in `internal/state` (`FocusMRU`) under a per-`HERDR_SESSION` subdirectory of `HERDR_PLUGIN_STATE_DIR` (default session keeps the root). Do not replace this with an N-item history cycle. Agent/tab and workspace pairs must stay orthogonal; cross-workspace `last-agent` jumps use `PrepareAgentJump` so they do not rewrite workspace state. Closed or missing targets clear only the saved slot and refuse, rather than falling back to older picker history.
+
+Keep all Herdr CLI calls behind `internal/herdr.NewCLIClient`. Every consumer of
+`HERDR_BIN_PATH` must require a regular executable (`-x`) and fall back to the
+PATH-resolved `herdr` (`exec.LookPath`, equivalent to `command -v`) before
+invocation; the stale-path regressions live in `internal/herdr/client_test.go`.
+Missing-target cleanup must use `IsMissingTarget`'s narrow stderr classification,
+not generic command or shell errors.
 
 ## Maintaining this file
 
