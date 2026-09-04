@@ -10,6 +10,8 @@ tabs.
 
 ![Herdr Sesh picker demo](assets/picker-demo-42.gif)
 
+See [VISION.md](VISION.md) for why this fork exists and the commitments it keeps.
+
 ## Features
 
 - Search active Herdr workspaces, Sesh-style TOML sessions, and zoxide history
