@@ -24,11 +24,11 @@ This repository is a Go CLI plugin for Herdr named `herdr-sesh`.
 - `./bin/herdr-sesh --version` smoke-tests the built CLI.
 - `./bin/herdr-sesh list --json --config testdata/sesh.toml` checks fixture-backed session listing.
 
-CI should run formatting, vet, tests, build, and CLI smoke checks; mirror those checks before opening a pull request. Prefer `just` recipes so local checks use pinned tools.
+CI runs formatting, vet, tests, build, and CLI smoke checks; mirror those checks before opening a pull request. Run all local checks through `just` recipes - bare `go test`/`go build`/`gofmt` invocations run outside the pinned toolchain (missing golangci-lint and race detection) and do not count as validation.
 
-The canonical local gate is `just check` (lint, formatting, race-enabled tests,
+Never declare work done or open a PR on bare `gofmt`/`go test`/`go build` output alone. The canonical local gate is `just check` (lint, formatting, race-enabled tests,
 and release-ref validation), followed by `just build`, the version smoke check,
-and the fixture-backed `list --json` smoke check.
+and the fixture-backed `list --json` smoke check. If `mise`/`prek` are unavailable, run `mise install` first and rerun the gate instead of approving checks that could not run.
 
 ## Coding Style & Naming Conventions
 
@@ -62,6 +62,9 @@ PATH-resolved `herdr` (`exec.LookPath`, equivalent to `command -v`) before
 invocation; the stale-path regressions live in `internal/herdr/client_test.go`.
 Missing-target cleanup must use `IsMissingTarget`'s narrow stderr classification,
 not generic command or shell errors.
+
+## Backpass
+Backpass trains AGENTS.md from landed sessions; config in `.backpassrc.json` is gpu-specific (cloneRoots point at this machine's pool slots). Run `bunx backpass@latest scan --force --json` then `bunx backpass@latest`.
 
 ## Maintaining this file
 
