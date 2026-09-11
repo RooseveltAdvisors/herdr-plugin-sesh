@@ -1,5 +1,16 @@
 # Sesh for Herdr
 
+## Demo
+
+Open the picker, jump between workspaces, then toggle the previous agent/tab —
+the active target stays visible in the status line.
+
+![Workspace and agent navigation](assets/herdr-sesh-navigation.gif)
+
+| Picker opens on the current workspace | `last` returns to the previous workspace | `last-agent` toggles the previous agent/tab |
+| --- | --- | --- |
+| ![Storefront workspace](assets/herdr-sesh-state-storefront.png) | ![Billing workspace](assets/herdr-sesh-state-billing.png) | ![Tests agent](assets/herdr-sesh-state-last-agent.png) |
+
 A [Sesh](https://github.com/joshmedeski/sesh)-inspired workspace picker and
 session manager for [Herdr](https://herdr.dev/).
 
@@ -7,8 +18,6 @@ session manager for [Herdr](https://herdr.dev/).
 zoxide history in one searchable overlay. Selecting an item focuses its
 existing workspace or creates a new one with the configured startup command and
 tabs.
-
-![Herdr Sesh picker demo](assets/picker-demo-42.gif)
 
 See [VISION.md](VISION.md) for why this fork exists and the commitments it keeps.
 
