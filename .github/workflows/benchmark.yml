@@ -50,7 +50,12 @@ jobs:
 
       - name: Run base benchmarks
         working-directory: ${{ runner.temp }}/benchmark-base
-        run: just bench 10 | tee "$RUNNER_TEMP/benchmark-base.txt"
+        # The base revision may predate the bench recipe (e.g. when this
+        # workflow itself is newly introduced); run it with the pull
+        # request's justfile, which only drives go test against base code.
+        run: |
+          cp -- "$GITHUB_WORKSPACE/justfile" justfile
+          just bench 10 | tee "$RUNNER_TEMP/benchmark-base.txt"
 
       - name: Run pull request benchmarks
         run: just bench 10 | tee "$RUNNER_TEMP/benchmark-candidate.txt"
