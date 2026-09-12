@@ -104,8 +104,8 @@ description = "toggle previous workspace"
 ```
 
 Bindings must use the `RooseveltAdvisors.herdr-sesh.*` action ids (not
-`RooseveltAdvisors.herdr-sesh.*`, and not stock `previous_tab` / `previous_workspace`).
-Stock `previous_tab` is an N-item cycle; `RooseveltAdvisors.herdr-sesh.last` fails with
+`fullerzz.sesh.*`, and not stock `previous_tab` / `previous_workspace`).
+Stock `previous_tab` is an N-item cycle; stale `fullerzz.sesh.last` bindings fail with
 `custom command failed` when only this fork is installed.
 
 `last` and `last-agent` are strict two-target toggles (tmux-style). They alternate

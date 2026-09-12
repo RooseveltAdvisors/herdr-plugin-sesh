@@ -80,7 +80,10 @@ Each connection attempt follows this order:
 5. On protocol 20, drain each currently available event batch and request a
    fresh snapshot. Apply focus events only for workspaces that still exist,
    close events only for workspaces that no longer exist, then record the
-   snapshot's authoritative `focused_workspace_id`.
+   snapshot's authoritative `focused_workspace_id` unless the batch's final
+   focus event already recorded it; skipping that redundant re-observation
+   keeps a pending one-shot cross-workspace agent-jump suppression effective
+   through the snapshot reconciliation.
 6. On protocol 21 and newer, apply the already-buffered and future live events
    directly in decoder order.
 
@@ -117,7 +120,7 @@ sequenceDiagram
         W->>W: Drain available event batch
         W->>S: session.snapshot
         S-->>W: Current focus + workspace IDs
-        W->>H: Reconcile batch, then record snapshot focus
+        W->>H: Reconcile batch, then record snapshot focus unless already applied
     end
     loop Ordered live stream
         E-->>W: workspace event

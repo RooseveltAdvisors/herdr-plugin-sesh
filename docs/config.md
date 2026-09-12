@@ -338,14 +338,14 @@ The installed plugin starts tracking automatically through startup, focus, and
 close hooks; no additional keybinding or configuration is required. Closed
 workspaces are removed from history.
 
-History is separate for each Herdr session, using `HERDR_SOCKET_PATH` to select
-`${HERDR_PLUGIN_STATE_DIR}/history/<socket-hash>/history.json`. Existing unscoped
-history is copied on first use for the default session only; named sessions
-start with their own history. Hiding the footer with `show_last_workspace = false`
-does not disable history tracking or the `last` command.
+History is separate for each Herdr session, keyed by `HERDR_SESSION` and the
+session's socket path. Existing unscoped history is copied on first use for the
+default session only; named sessions start with their own history. Hiding the
+footer with `show_last_workspace = false` does not disable history tracking or
+the `last` command.
 
-See [Workspace history tracking](development/workspace-history.md) for lifecycle,
-persistence, and reconnect limitations.
+See [Workspace history tracking](development/workspace-history.md) for state
+paths, lifecycle, persistence, and reconnect limitations.
 
 #### Cursor and status indicators
 
