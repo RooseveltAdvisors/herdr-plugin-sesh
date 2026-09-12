@@ -4,6 +4,22 @@ _default:
 run:
     go run ./cmd/herdr-sesh
 
+# Build the documentation site
+build-docs:
+    uv run --frozen zensical build --clean --strict
+
+# Build latest and all release-tag documentation for GitHub Pages
+build-docs-versions:
+    uv run --frozen python .github/scripts/build-docs-versions.py
+
+# Exercise versioned documentation with isolated Git history
+test-docs-versions:
+    uv run --frozen python .github/scripts/test-docs-versions.py
+
+# Preview the documentation site locally
+serve-docs:
+    uv run --frozen zensical serve
+
 # Clean build artifacts
 clean:
     @echo "{{ BOLD + RED + BG_BLACK }}󰿞 Cleaning build artifacts...{{ NORMAL }}"
@@ -13,7 +29,7 @@ clean:
 build:
     @echo "{{ BOLD + BLUE + BG_BLACK }} Building the project...{{ NORMAL }}"
     mkdir -p bin
-    go build -o bin/herdr-sesh ./cmd/herdr-sesh
+    go build -ldflags "-X github.com/fullerzz/herdr-plugin-sesh/internal/app.Version=$(git describe --tags --match 'v[0-9]*' --always --dirty 2>/dev/null || printf 'dev')" -o bin/herdr-sesh ./cmd/herdr-sesh
 
 # Rebuild and relink this checkout as a local Herdr plugin
 install-plugin: build
@@ -40,9 +56,40 @@ test:
     @echo "{{ BOLD + BLUE + BG_BLACK }} Running tests...{{ NORMAL }}"
     gotestsum --format-icons=octicons --format=pkgname -- -race ./...
 
+# Run the application benchmark suite
+bench count='1':
+    @echo 'Unit commands/op better=lower assume=exact'
+    @echo 'Unit canceled/op assume=exact'
+    @echo 'Unit completed/op assume=exact'
+    go test -run '^$' -bench=. -benchmem -count={{count}} ./internal/sources ./internal/picker
+
+# Run the benchmark suite under the CodSpeed walltime instrument
+bench-codspeed:
+    go test -bench=. ./internal/sources ./internal/picker
+
+# Compare two saved benchmark runs
+bench-compare base candidate:
+    go tool benchstat "base={{base}}" "candidate={{candidate}}"
+
 # Exercise release tag resolution against a same-named branch/tag collision
 test-release-ref:
     bash .github/scripts/test-release-ref.sh
+
+# Preview the changelog on stdout, optionally using the next release version
+preview-changelog $version='':
+    #!/usr/bin/env bash
+    set -euo pipefail
+
+    if [[ -z "${GITHUB_TOKEN:-}" ]]; then
+        echo "GITHUB_TOKEN is required for GitHub changelog metadata" >&2
+        exit 1
+    fi
+
+    if [[ -n "$version" ]]; then
+        mise exec -- git-cliff --tag "$version"
+    else
+        mise exec -- git-cliff
+    fi
 
 # Validate, tag, and trigger the GitHub release workflow
 [confirm("Create and push release " + tag + "?")]
@@ -55,16 +102,44 @@ release $tag:
         echo "Tag mismatch: $tag != manifest $expected_tag" >&2
         exit 1
     fi
+    current_branch=$(git branch --show-current)
+    if [[ "$current_branch" != "main" ]]; then
+        echo "Releases must be created from main, got: ${current_branch:-detached HEAD}" >&2
+        exit 1
+    fi
     if [[ -n "$(git status --porcelain)" ]]; then
         echo "Working tree must be clean before releasing" >&2
+        exit 1
+    fi
+    if git rev-parse --verify --quiet "refs/tags/$tag" >/dev/null; then
+        echo "Tag already exists: $tag" >&2
+        exit 1
+    fi
+    if [[ -z "${GITHUB_TOKEN:-}" ]]; then
+        echo "GITHUB_TOKEN is required for GitHub changelog metadata" >&2
         exit 1
     fi
 
     just check
     just build
     ./bin/herdr-sesh --version
-    ./bin/herdr-sesh list --json --config testdata/sesh.toml >/dev/null
+    ./bin/herdr-sesh list --json --config testdata/herdr-sesh.toml >/dev/null
+    mise exec -- git-cliff --tag "$tag" --output CHANGELOG.md
+    if ! grep -Fq "## ${tag} " CHANGELOG.md; then
+        echo "Generated changelog is missing $tag" >&2
+        exit 1
+    fi
+    if git diff --quiet -- CHANGELOG.md; then
+        echo "Changelog is already up to date for $tag" >&2
+        exit 1
+    fi
+    git add CHANGELOG.md
     git tag -a "$tag" -m "Release $tag"
+    if ! git commit -m "docs(CHANGELOG): update CHANGELOG.md [skip ci]"; then
+        git tag -d "$tag"
+        git restore --staged --worktree -- CHANGELOG.md
+        exit 1
+    fi
     git push --atomic origin HEAD "refs/tags/$tag"
 
 # Run all checks for code changes

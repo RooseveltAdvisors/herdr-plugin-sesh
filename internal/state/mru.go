@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
-	"syscall"
 )
 
 // AgentRef identifies a tab/agent target for last-agent toggles.
@@ -80,6 +79,7 @@ func SaveFocusMRU(dir string, m FocusMRU) error {
 	if dir == "" {
 		return nil
 	}
+	//nolint:gosec // dir is the trusted plugin-owned state directory supplied to this API.
 	if err := os.MkdirAll(dir, 0700); err != nil {
 		return err
 	}
@@ -116,29 +116,18 @@ func withFocusMRULock(dir string, fn func(*FocusMRU) error) error {
 		var m FocusMRU
 		return fn(&m)
 	}
-	if err := os.MkdirAll(dir, 0700); err != nil {
-		return err
-	}
-	lockPath := filepath.Join(dir, "history.lock")
-	//nolint:gosec // lockPath is the fixed lock file inside the plugin-owned state dir.
-	lockFile, err := os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR, 0600)
-	if err != nil {
-		return err
-	}
-	defer func() { _ = lockFile.Close() }()
-	if err := syscall.Flock(int(lockFile.Fd()), syscall.LOCK_EX); err != nil {
-		return err
-	}
-	defer func() { _ = syscall.Flock(int(lockFile.Fd()), syscall.LOCK_UN) }()
-
-	m, err := LoadFocusMRU(dir)
-	if err != nil {
-		return err
-	}
-	if err := fn(&m); err != nil {
-		return err
-	}
-	return SaveFocusMRU(dir, m)
+	// Share the one history.lock with upstream's history mutations so the
+	// event watcher and the toggle commands never interleave writes.
+	return withHistoryLock(dir, func() error {
+		m, err := LoadFocusMRU(dir)
+		if err != nil {
+			return err
+		}
+		if err := fn(&m); err != nil {
+			return err
+		}
+		return SaveFocusMRU(dir, m)
+	})
 }
 
 // ObserveWorkspaceFocus updates the workspace two-slot pair from an authoritative focus event.

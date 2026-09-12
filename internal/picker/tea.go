@@ -18,13 +18,19 @@ import (
 	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/x/ansi"
 
+	"github.com/fullerzz/herdr-plugin-sesh/internal/config"
 	sessionmodel "github.com/fullerzz/herdr-plugin-sesh/internal/model"
 	previewpkg "github.com/fullerzz/herdr-plugin-sesh/internal/preview"
 )
 
 const (
-	defaultVisibleRows    = 12
-	statusRefreshInterval = time.Second
+	defaultVisibleRows         = 12
+	statusRefreshInterval      = time.Second
+	panePreviewRefreshInterval = time.Second
+
+	workspaceSortWorkspace = "workspace"
+	workspaceSortRecent    = "recent"
+	workspaceSortAgent     = "agent"
 )
 
 const (
@@ -33,6 +39,7 @@ const (
 	defaultWidth       = 80
 	previewSplitWidth  = 92
 	minPreviewWidth    = 36
+	minListWidth       = 36
 	maxPreviewWidth    = 52
 	previewTitleRows   = 1
 	pickerChromeRows   = 8
@@ -47,19 +54,28 @@ const (
 	herdrSourceIcon    = "\U000f0cc6"
 	zoxideSourceIcon   = "\uf114"
 	configSourceIcon   = "\ue615"
+
+	defaultSkyColor    = "#7DCFFF"
+	defaultVioletColor = "#BB9AF7"
+	defaultGreenColor  = "#9ECE6A"
+	defaultAmberColor  = "#E0AF68"
+	defaultRedColor    = "#F7768E"
+	defaultTextColor   = "#C0CAF5"
+	defaultMutedColor  = "#565F89"
+	defaultGhostColor  = "#737AA2"
 )
 
 var (
 	agentStatusSpinner = spinner.Jump
 
-	skyColor    = lipgloss.Color("#7DCFFF")
-	violetColor = lipgloss.Color("#BB9AF7")
-	greenColor  = lipgloss.Color("#9ECE6A")
-	amberColor  = lipgloss.Color("#E0AF68")
-	redColor    = lipgloss.Color("#F7768E")
-	textColor   = lipgloss.Color("#C0CAF5")
-	mutedColor  = lipgloss.Color("#565F89")
-	ghostColor  = lipgloss.Color("#737AA2")
+	skyColor    = lipgloss.Color(defaultSkyColor)
+	violetColor = lipgloss.Color(defaultVioletColor)
+	greenColor  = lipgloss.Color(defaultGreenColor)
+	amberColor  = lipgloss.Color(defaultAmberColor)
+	redColor    = lipgloss.Color(defaultRedColor)
+	textColor   = lipgloss.Color(defaultTextColor)
+	mutedColor  = lipgloss.Color(defaultMutedColor)
+	ghostColor  = lipgloss.Color(defaultGhostColor)
 
 	titleStyle = lipgloss.NewStyle().
 			Foreground(violetColor).
@@ -94,6 +110,13 @@ var (
 	pathStyle = lipgloss.NewStyle().
 			Foreground(mutedColor)
 
+	worktreeMarkerStyle = lipgloss.NewStyle().
+				Foreground(violetColor).
+				Bold(true)
+
+	worktreeRelationStyle = lipgloss.NewStyle().
+				Foreground(ghostColor)
+
 	emptyStyle = lipgloss.NewStyle().
 			Foreground(amberColor)
 
@@ -105,24 +128,51 @@ var (
 )
 
 var renderPreview = previewpkg.Render
+var renderPanePreview = previewpkg.RenderPane
 
 type Options struct {
-	Context               context.Context
-	Output                io.Writer
-	Prompt                string
-	Placeholder           string
-	ShowIcons             bool
-	SeparatorAware        bool
-	DefaultPreviewCommand string
-	FZFCommand            string
-	RefreshAgentStatuses  func() (map[string]string, error)
-	CloseWorkspace        func(context.Context, string) error
-	ReloadSessions        func(context.Context) ([]sessionmodel.Session, error)
-	RecentWorkspaceIDs    []string
-	RecentWorkspaceSort   bool
+	// nil uses the default binding; an empty string disables cycling.
+	CyclePreviewModeKey            *string
+	Context                        context.Context
+	Output                         io.Writer
+	Prompt                         string
+	Placeholder                    string
+	ShowIcons                      bool
+	HerdrThemeInherit              bool
+	DisableWorktreeIconReplacement bool
+	HideLastWorkspace              bool
+	HideLastWorkspacePath          bool
+	SeparatorAware                 bool
+	DisableHomePrioritization      bool
+	HidePath                       bool
+	HidePreview                    bool
+	PreviewMode                    string
+	DefaultPreviewCommand          string
+	FZFCommand                     string
+	RefreshAgentStatuses           func() (map[string]string, error)
+	CloseWorkspace                 func(context.Context, string) error
+	// ReloadPicker refreshes picker state after a workspace close. Its
+	// ReloadResult is consumed even when it returns an error: the
+	// last-workspace fields must always be valid (set LastWorkspaceUnknown
+	// when unsure), and a nil HerdrWorkspaces means "keep the existing
+	// metadata" while an empty slice means "no workspaces".
+	ReloadPicker         func(context.Context) (ReloadResult, error)
+	RecentWorkspaceIDs   []string
+	WorkspaceSort        string
+	LastWorkspaceID      string
+	LastWorkspaceUnknown bool
+	HerdrWorkspaces      []sessionmodel.Session
+}
+
+type ReloadResult struct {
+	Sessions             []sessionmodel.Session
+	HerdrWorkspaces      []sessionmodel.Session
+	LastWorkspaceID      string
+	LastWorkspaceUnknown bool
 }
 
 func Run(items []sessionmodel.Session, opts Options) (sessionmodel.Session, bool, error) {
+	configureHerdrTheme(opts.HerdrThemeInherit)
 	var popts []tea.ProgramOption
 	if opts.Output != nil {
 		popts = append(popts, tea.WithOutput(opts.Output))
@@ -159,17 +209,34 @@ type teaModel struct {
 	reduceMotion        bool
 	smear               smearPreset
 
-	preview    string
-	previewKey string
+	preview              string
+	previewLoading       bool
+	previewWidth         int
+	draggingPreview      bool
+	previewKey           string
+	previewParentContext context.Context
+	previewContext       context.Context
+	cancelPreview        context.CancelFunc
+	previewRequestID     uint64
+	panePreview          bool
+	cyclePreviewModeKey  string
 
 	defaultPreviewCommand   string
+	hidePath                bool
+	hidePreview             bool
 	showIcons               bool
+	replaceWorktreeIcon     bool
+	hideLastWorkspace       bool
+	hideLastWorkspacePath   bool
 	refreshAgentStatuses    func() (map[string]string, error)
 	workspaceOrder          []string
 	recentWorkspaceIDs      []string
-	recentSort              bool
+	workspaceSort           string
+	lastWorkspaceID         string
+	lastWorkspaceUnknown    bool
+	herdrWorkspaces         map[string]sessionmodel.Session
 	closeWorkspace          func(context.Context, string) error
-	reloadSessions          func(context.Context) ([]sessionmodel.Session, error)
+	reloadPicker            func(context.Context) (ReloadResult, error)
 	workspaceCloseContext   context.Context
 	closingWorkspaceID      string
 	cancelWorkspaceClose    context.CancelFunc
@@ -178,9 +245,14 @@ type teaModel struct {
 }
 
 type previewMsg struct {
-	key  string
-	text string
+	key       string
+	requestID uint64
+	text      string
 }
+
+type panePreviewTickMsg struct{ requestID uint64 }
+
+type previewLoadingMsg struct{ requestID uint64 }
 
 type statusRefreshTickMsg struct{}
 
@@ -191,7 +263,8 @@ type agentStatusesMsg struct {
 
 type workspaceCloseMsg struct {
 	workspaceID string
-	sessions    []sessionmodel.Session
+	result      ReloadResult
+	reloadRan   bool
 	closeErr    error
 	reloadErr   error
 }
@@ -211,12 +284,19 @@ func newTeaModel(items []sessionmodel.Session, opts Options) teaModel {
 		closeContext = context.Background()
 	}
 	workspaceOrder := herdrWorkspaceIDs(items)
-	if opts.RecentWorkspaceSort {
-		items = append([]sessionmodel.Session(nil), items...)
-		sortHerdrWorkspaces(items, opts.RecentWorkspaceIDs)
+	items = append([]sessionmodel.Session(nil), items...)
+	workspaceSort := normalizeWorkspaceSort(opts.WorkspaceSort)
+	initialOrder := workspaceOrder
+	switch workspaceSort {
+	case workspaceSortRecent:
+		initialOrder = opts.RecentWorkspaceIDs
+	case workspaceSortAgent:
+		initialOrder = agentWorkspaceOrder(items, workspaceOrder)
 	}
+	sortHerdrWorkspaces(items, initialOrder)
 	list := New(items)
 	list.SeparatorAware = opts.SeparatorAware
+	list.DisableHomePrioritization = opts.DisableHomePrioritization
 	prompt := opts.Prompt
 	if prompt == "" {
 		prompt = defaultPrompt
@@ -235,26 +315,40 @@ func newTeaModel(items []sessionmodel.Session, opts Options) teaModel {
 	styles.Cursor.Color = skyColor
 	input.SetStyles(styles)
 	input.Focus()
+	cyclePreviewModeKey := config.Default().Keys.CyclePreviewMode
+	if opts.CyclePreviewModeKey != nil {
+		cyclePreviewModeKey = *opts.CyclePreviewModeKey
+	}
 	reduceMotion := os.Getenv("HERDR_SESH_REDUCE_MOTION")
 	m := teaModel{
 		list:                  list,
 		input:                 input,
 		agentSpinner:          spinner.New(spinner.WithSpinner(agentStatusSpinner)),
 		defaultPreviewCommand: opts.DefaultPreviewCommand,
+		hidePath:              opts.HidePath,
+		hidePreview:           opts.HidePreview,
+		panePreview:           opts.PreviewMode == "pane",
+		cyclePreviewModeKey:   cyclePreviewModeKey,
 		showIcons:             opts.ShowIcons,
+		replaceWorktreeIcon:   !opts.DisableWorktreeIconReplacement,
+		hideLastWorkspace:     opts.HideLastWorkspace,
+		hideLastWorkspacePath: opts.HideLastWorkspacePath,
 		refreshAgentStatuses:  opts.RefreshAgentStatuses,
 		workspaceOrder:        workspaceOrder,
 		recentWorkspaceIDs:    append([]string(nil), opts.RecentWorkspaceIDs...),
-		recentSort:            opts.RecentWorkspaceSort,
+		workspaceSort:         workspaceSort,
+		lastWorkspaceID:       opts.LastWorkspaceID,
+		lastWorkspaceUnknown:  opts.LastWorkspaceUnknown,
+		herdrWorkspaces:       workspaceSessionsByID(opts.HerdrWorkspaces),
 		closeWorkspace:        opts.CloseWorkspace,
-		reloadSessions:        opts.ReloadSessions,
+		reloadPicker:          opts.ReloadPicker,
 		workspaceCloseContext: closeContext,
+		previewParentContext:  closeContext,
 		reduceMotion:          reduceMotion == "1" || strings.EqualFold(reduceMotion, "true"),
 		smear:                 newSmearPreset(os.Getenv("HERDR_SESH_SMEAR_PRESET")),
 	}
-	if current, ok := list.Current(); ok {
-		m.previewKey = sessionmodel.Key(current)
-		m.preview = "Loading preview..."
+	if current, ok := list.Current(); ok && !m.hidePreview {
+		m, _ = m.startPreview(current)
 	}
 	return m
 }
@@ -262,7 +356,7 @@ func newTeaModel(items []sessionmodel.Session, opts Options) teaModel {
 func (m teaModel) Init() tea.Cmd {
 	cmds := []tea.Cmd{m.input.Focus()}
 	if current, ok := m.list.Current(); ok && m.previewKey != "" {
-		cmds = append(cmds, previewCommand(m.previewKey, current, m.defaultPreviewCommand))
+		cmds = append(cmds, previewCommand(m.previewContext, m.previewKey, m.previewRequestID, current, m.defaultPreviewCommand, m.panePreview), previewLoadingCommand(m.previewContext, m.previewRequestID))
 	}
 	if m.refreshAgentStatuses != nil {
 		cmds = append(cmds, scheduleStatusRefresh(), m.agentSpinner.Tick)
@@ -345,10 +439,32 @@ func (m teaModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, refreshAgentStatusesCommand(m.refreshAgentStatuses)
 	}
 	if statuses, ok := msg.(agentStatusesMsg); ok {
-		if statuses.err == nil {
-			m.list.UpdateAgentStatuses(statuses.statuses)
+		if statuses.err != nil {
+			return m, scheduleStatusRefresh()
 		}
-		return m, scheduleStatusRefresh()
+		selectedKey := ""
+		if current, currentOK := m.list.Current(); currentOK {
+			selectedKey = sessionmodel.Key(current)
+		}
+		m.list.UpdateAgentStatuses(statuses.statuses)
+		if m.workspaceSort != workspaceSortAgent {
+			return m, scheduleStatusRefresh()
+		}
+		m.resortWorkspaces()
+		m.list.Filter(m.list.Query)
+		for i, item := range m.list.Filtered {
+			if sessionmodel.Key(item) == selectedKey {
+				m.list.Selected = i
+				break
+			}
+		}
+		m.smearActive = false
+		m.focusSmearActive = false
+		m, previewCmd := m.refreshPreview()
+		if previewCmd == nil {
+			return m, scheduleStatusRefresh()
+		}
+		return m, tea.Batch(previewCmd, scheduleStatusRefresh())
 	}
 	if _, ok := msg.(smearTickMsg); ok {
 		if m.focusSmearActive {
@@ -382,10 +498,16 @@ func (m teaModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, m.smearTick()
 	}
 	if preview, ok := msg.(previewMsg); ok {
-		if preview.key == m.previewKey {
-			m.preview = preview.text
+		return m.receivePreview(preview)
+	}
+	if loading, ok := msg.(previewLoadingMsg); ok {
+		if loading.requestID == m.previewRequestID && m.cancelPreview != nil && m.previewContext.Err() == nil {
+			m.previewLoading = true
 		}
 		return m, nil
+	}
+	if tick, ok := msg.(panePreviewTickMsg); ok {
+		return m.refreshPanePreview(tick)
 	}
 	if closed, ok := msg.(workspaceCloseMsg); ok {
 		if closed.workspaceID != m.closingWorkspaceID {
@@ -395,31 +517,42 @@ func (m teaModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.cancelWorkspaceClose = nil
 		if m.quitAfterWorkspaceClose {
 			m.quitAfterWorkspaceClose = false
+			m = m.cancelActivePreview()
 			return m, tea.Quit
 		}
 		if closed.closeErr != nil {
 			m.closeError = fmt.Sprintf("Failed to close workspace: %v", closed.closeErr)
 			return m.refreshPreview()
 		}
+		if closed.reloadRan {
+			m.lastWorkspaceID = closed.result.LastWorkspaceID
+			m.lastWorkspaceUnknown = closed.result.LastWorkspaceUnknown
+		}
+		if closed.result.HerdrWorkspaces != nil {
+			m.herdrWorkspaces = workspaceSessionsByID(closed.result.HerdrWorkspaces)
+		}
 		selectedKey := ""
 		if current, currentOK := m.list.Current(); currentOK {
 			selectedKey = sessionmodel.Key(current)
 		}
-		if closed.reloadErr == nil && closed.sessions != nil {
-			m.workspaceOrder = herdrWorkspaceIDs(closed.sessions)
-			m.list.All = append(m.list.All[:0], closed.sessions...)
-			if m.recentSort {
-				sortHerdrWorkspaces(m.list.All, m.recentWorkspaceIDs)
-			}
+		if closed.reloadErr == nil && closed.result.Sessions != nil {
+			m.workspaceOrder = herdrWorkspaceIDs(closed.result.Sessions)
+			m.list.All = append(m.list.All[:0], closed.result.Sessions...)
 		} else {
 			remaining := m.list.All[:0]
 			for _, item := range m.list.All {
-				if item.Source != "herdr" || item.WorkspaceID != closed.workspaceID {
-					remaining = append(remaining, item)
+				if item.Source == "herdr" && item.WorkspaceID == closed.workspaceID {
+					continue
 				}
+				if item.Worktree.ParentWorkspaceID == closed.workspaceID {
+					item.Worktree.ParentWorkspaceID = ""
+					item.Worktree.ParentWorkspaceName = ""
+				}
+				remaining = append(remaining, item)
 			}
 			m.list.All = remaining
 		}
+		m.resortWorkspaces()
 		m.list.Filter(m.list.Query)
 		for i, item := range m.list.Filtered {
 			if sessionmodel.Key(item) == selectedKey {
@@ -435,7 +568,11 @@ func (m teaModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	if size, ok := msg.(tea.WindowSizeMsg); ok {
 		m.width = size.Width
 		m.height = size.Height
+		m.draggingPreview = false
 		return m, nil
+	}
+	if mouse, ok := msg.(tea.MouseMsg); ok {
+		return m.resizePreview(mouse), nil
 	}
 	if _, ok := msg.(tea.PasteMsg); ok {
 		return m.updateInput(msg)
@@ -449,14 +586,22 @@ func (m teaModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, tea.Batch(cmd, previewCmd)
 	}
 	m.closeError = ""
+	if m.cyclePreviewModeKey != "" && key.String() == m.cyclePreviewModeKey {
+		if m.hidePreview || m.closingWorkspaceID != "" {
+			return m, nil
+		}
+		m.panePreview = !m.panePreview
+		m.previewKey = ""
+		return m.refreshPreview()
+	}
 	switch key.String() {
 	case "ctrl+c", "esc":
 		if m.closingWorkspaceID != "" {
 			m.quitAfterWorkspaceClose = true
 			m.cancelWorkspaceClose()
-			m.preview = "Cancelling workspace close..."
 			return m, nil
 		}
+		m = m.cancelActivePreview()
 		return m, tea.Quit
 	case "enter":
 		if m.closingWorkspaceID != "" {
@@ -466,6 +611,7 @@ func (m teaModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.choice = choice
 			m.chosen = true
 		}
+		m = m.cancelActivePreview()
 		return m, tea.Quit
 	case "up", "ctrl+p", "ctrl+k":
 		if !m.listFocused {
@@ -515,37 +661,52 @@ func (m teaModel) closeSelectedWorkspace() (teaModel, tea.Cmd) {
 	}
 	m.closingWorkspaceID = current.WorkspaceID
 	m.closeError = ""
+	m = m.cancelActivePreview()
 	m.previewKey = ""
-	m.preview = "Closing workspace..."
 	closeCtx, cancel := context.WithCancel(m.workspaceCloseContext)
 	m.cancelWorkspaceClose = cancel
-	return m, closeWorkspaceCommand(closeCtx, cancel, m.closeWorkspace, m.reloadSessions, current.WorkspaceID)
+	return m, closeWorkspaceCommand(closeCtx, cancel, m.closeWorkspace, m.reloadPicker, current.WorkspaceID)
 }
 
 func closeWorkspaceCommand(
 	ctx context.Context,
 	cancel context.CancelFunc,
 	closeWorkspace func(context.Context, string) error,
-	reloadSessions func(context.Context) ([]sessionmodel.Session, error),
+	reloadPicker func(context.Context) (ReloadResult, error),
 	workspaceID string,
 ) tea.Cmd {
 	return func() tea.Msg {
 		defer cancel()
 		msg := workspaceCloseMsg{workspaceID: workspaceID, closeErr: closeWorkspace(ctx, workspaceID)}
-		if msg.closeErr == nil && reloadSessions != nil {
-			msg.sessions, msg.reloadErr = reloadSessions(ctx)
+		if msg.closeErr == nil && reloadPicker != nil {
+			msg.result, msg.reloadErr = reloadPicker(ctx)
+			msg.reloadRan = true
 		}
 		return msg
 	}
 }
 
-func (m teaModel) toggleWorkspaceSort() (teaModel, tea.Cmd) {
-	m.recentSort = !m.recentSort
+func (m teaModel) resortWorkspaces() {
 	order := m.workspaceOrder
-	if m.recentSort {
+	switch m.workspaceSort {
+	case workspaceSortRecent:
 		order = m.recentWorkspaceIDs
+	case workspaceSortAgent:
+		order = agentWorkspaceOrder(m.list.All, m.workspaceOrder)
 	}
 	sortHerdrWorkspaces(m.list.All, order)
+}
+
+func (m teaModel) toggleWorkspaceSort() (teaModel, tea.Cmd) {
+	switch m.workspaceSort {
+	case workspaceSortWorkspace:
+		m.workspaceSort = workspaceSortRecent
+	case workspaceSortRecent:
+		m.workspaceSort = workspaceSortAgent
+	default:
+		m.workspaceSort = workspaceSortWorkspace
+	}
+	m.resortWorkspaces()
 	m.list.Selected = 0
 	m.list.Filter(m.list.Query)
 	m.smearActive = false
@@ -587,13 +748,16 @@ func refreshAgentStatusesCommand(refresh func() (map[string]string, error)) tea.
 
 func (m teaModel) View() tea.View {
 	width := m.contentWidth()
-	listWidth, previewWidth := previewLayout(width)
+	listWidth, previewWidth := m.previewLayout()
 	lines := []string{"", m.header(width), horizontalRule(width)}
 	input := m.input
 	input.SetWidth(maxInt(8, width-lipgloss.Width(input.Prompt)-1))
 	lines = append(lines, fitLine(input.View(), width), horizontalRule(width))
 
-	if previewWidth > 0 {
+	if m.hidePreview {
+		lines = append(lines, sectionStyle.Render("WORKSPACES"))
+		lines = append(lines, strings.Split(strings.TrimSuffix(m.listView(width, m.listOnlyBodyLines()), "\n"), "\n")...)
+	} else if previewWidth > 0 {
 		previewLines := m.previewBodyLines()
 		list := sectionStyle.Render("WORKSPACES") + "\n" + m.listView(listWidth, previewLines)
 		preview := m.previewView(previewWidth, previewLines)
@@ -604,24 +768,19 @@ func (m teaModel) View() tea.View {
 		lines = append(lines, strings.Split(strings.TrimSuffix(m.listView(listWidth, listRows), "\n"), "\n")...)
 		lines = append(lines, strings.Split(m.previewView(width, previewLines), "\n")...)
 	}
-	sortMode := "workspace"
-	if m.recentSort {
-		sortMode = "recent"
-	}
-	footerText := fmt.Sprintf("enter select · ctrl+j/k move · ctrl+x close · ctrl+r %s · ctrl+u clear · esc exit", sortMode)
-	if lipgloss.Width(footerText) > width {
-		footerText = fmt.Sprintf("enter · ctrl+j/k move · ctrl+x close · ctrl+r %s · ctrl+u clear · esc", sortMode)
-	}
-	if lipgloss.Width(footerText) > width {
-		footerText = "enter · ctrl+j/k · ctrl+x close · ctrl+r sort · ctrl+u clear · esc"
-	}
-	footer := helpStyle.Render(footerText)
+	footer := helpStyle.Render(m.footerHelpText(width))
 	if m.closeError != "" {
 		footer = emptyStyle.Render(m.closeError)
+	} else if m.hidePreview && m.closingWorkspaceID != "" {
+		status := "Closing workspace..."
+		if m.quitAfterWorkspaceClose {
+			status = "Cancelling workspace close..."
+		}
+		footer = emptyStyle.Render(status)
 	}
 	lines = append(lines,
 		horizontalRule(width),
-		footer,
+		m.footerLine(footer, width),
 		"",
 	)
 	for i, line := range lines {
@@ -639,6 +798,9 @@ func (m teaModel) View() tea.View {
 	}
 	view := tea.NewView(strings.Join(framed, "\n"))
 	view.AltScreen = true
+	if previewWidth > 0 {
+		view.MouseMode = tea.MouseModeCellMotion
+	}
 	return view
 }
 
@@ -652,34 +814,129 @@ func herdrWorkspaceIDs(items []sessionmodel.Session) []string {
 	return ids
 }
 
-func sortHerdrWorkspaces(items []sessionmodel.Session, order []string) {
-	rank := make(map[string]int, len(order))
-	for i, id := range order {
-		if _, exists := rank[id]; id != "" && !exists {
-			rank[id] = i
-		}
+func normalizeWorkspaceSort(sortMode string) string {
+	switch sortMode {
+	case workspaceSortWorkspace, workspaceSortRecent, workspaceSortAgent:
+		return sortMode
+	default:
+		return workspaceSortWorkspace
 	}
-	workspaces := make([]sessionmodel.Session, 0, len(items))
+}
+
+func agentStatusRank(status string) int {
+	switch status {
+	case "blocked":
+		return 0
+	case "done":
+		return 1
+	case "working":
+		return 2
+	case "idle":
+		return 3
+	default:
+		return 4
+	}
+}
+
+func agentWorkspaceOrder(items []sessionmodel.Session, workspaceOrder []string) []string {
+	statuses := make(map[string]string, len(items))
 	for _, item := range items {
-		if item.Source == "herdr" {
-			workspaces = append(workspaces, item)
+		if item.Source == "herdr" && item.WorkspaceID != "" {
+			statuses[item.WorkspaceID] = item.AgentStatus
 		}
 	}
-	sort.SliceStable(workspaces, func(i, j int) bool {
-		iRank, iFound := rank[workspaces[i].WorkspaceID]
-		jRank, jFound := rank[workspaces[j].WorkspaceID]
-		if iFound != jFound {
-			return iFound
-		}
-		return iFound && iRank < jRank
+	order := append([]string(nil), workspaceOrder...)
+	sort.SliceStable(order, func(i, j int) bool {
+		return agentStatusRank(statuses[order[i]]) < agentStatusRank(statuses[order[j]])
 	})
+	return order
+}
+
+func sortHerdrWorkspaces(items []sessionmodel.Session, order []string) {
+	ranks := make(map[string]int, len(order))
+	for i, id := range order {
+		if _, exists := ranks[id]; id != "" && !exists {
+			ranks[id] = i
+		}
+	}
+
+	type rankedWorkspace struct {
+		session sessionmodel.Session
+		rank    int
+		family  int
+		parent  bool
+	}
+	workspaces := make([]rankedWorkspace, 0, len(items))
+	byID := make(map[string]struct{})
+	for _, item := range items {
+		if item.Source != "herdr" {
+			continue
+		}
+		// Unranked workspaces get unique ranks past the order list, preserving
+		// their input order and sorting them after every ranked workspace.
+		rank, ranked := ranks[item.WorkspaceID]
+		if !ranked {
+			rank = len(order) + len(workspaces)
+		}
+		workspaces = append(workspaces, rankedWorkspace{session: item, rank: rank})
+		if item.WorkspaceID != "" {
+			byID[item.WorkspaceID] = struct{}{}
+		}
+	}
+
+	// A family is a parent workspace plus its linked worktrees; a family's rank
+	// is its best member rank. Ranks are unique, so family ranks are too.
+	familyOrdinals := make(map[string]int, len(workspaces))
+	familyRanks := make([]int, 0, len(workspaces))
+	for i := range workspaces {
+		entry := &workspaces[i]
+		familyID := entry.session.WorkspaceID
+		parentID := entry.session.Worktree.ParentWorkspaceID
+		if _, parentPresent := byID[parentID]; parentID != "" && parentPresent {
+			familyID = parentID
+		}
+		entry.parent = entry.session.WorkspaceID == familyID
+		ordinal, exists := familyOrdinals[familyID]
+		if familyID == "" || !exists {
+			ordinal = len(familyRanks)
+			familyRanks = append(familyRanks, entry.rank)
+			if familyID != "" {
+				familyOrdinals[familyID] = ordinal
+			}
+		} else if entry.rank < familyRanks[ordinal] {
+			familyRanks[ordinal] = entry.rank
+		}
+		entry.family = ordinal
+	}
+
+	sort.SliceStable(workspaces, func(i, j int) bool {
+		a, b := workspaces[i], workspaces[j]
+		if a.family != b.family {
+			return familyRanks[a.family] < familyRanks[b.family]
+		}
+		if a.parent != b.parent {
+			return a.parent
+		}
+		return a.rank < b.rank
+	})
+
 	workspace := 0
 	for i := range items {
 		if items[i].Source == "herdr" {
-			items[i] = workspaces[workspace]
+			items[i] = workspaces[workspace].session
 			workspace++
 		}
 	}
+}
+
+func workspaceSessionsByID(items []sessionmodel.Session) map[string]sessionmodel.Session {
+	workspaces := make(map[string]sessionmodel.Session, len(items))
+	for _, item := range items {
+		if item.Source == "herdr" && item.WorkspaceID != "" {
+			workspaces[item.WorkspaceID] = item
+		}
+	}
+	return workspaces
 }
 
 func (m teaModel) listView(width, visibleRows int) string {
@@ -697,7 +954,8 @@ func (m teaModel) listView(width, visibleRows int) string {
 		for i := start; i < end; i++ {
 			selected := m.listFocused && !m.focusSmearActive && i == m.list.Selected
 			selectedRail := m.smear.headStyle().Render(m.smear.headGlyph + " ")
-			line := strings.TrimSuffix(rowWithRail(m.list.Filtered[i], selected, width, m.showIcons, m.list.Query, selectedRail, m.agentSpinner.View()), "\n")
+			treePrefix := worktreeTreePrefix(m.list.Filtered, i)
+			line := strings.TrimSuffix(rowWithRail(m.list.Filtered[i], selected, width, m.showIcons, m.replaceWorktreeIcon, m.hidePath, m.list.Query, selectedRail, m.agentSpinner.View(), treePrefix), "\n")
 			if rail, age := m.smearRail(i); rail != "" {
 				line = m.smear.trailStyle(age).Render(rail+" ") + strings.TrimPrefix(line, "  ")
 			}
@@ -728,6 +986,13 @@ func (m teaModel) previewBodyLines() int {
 		return compactPreviewBody
 	}
 	return lines
+}
+
+func (m teaModel) listOnlyBodyLines() int {
+	if m.height == 0 {
+		return defaultVisibleRows
+	}
+	return maxInt(1, m.height-pickerChromeRows-previewTitleRows)
 }
 
 func (m teaModel) stackedBodyLines() (int, int) {
@@ -765,9 +1030,91 @@ func (m teaModel) header(width int) string {
 	return fitLine(title+strings.Repeat(" ", gap)+count, width)
 }
 
+func (m teaModel) lastWorkspaceStatus() (label, path string) {
+	label = "None recorded"
+	if m.lastWorkspaceUnknown {
+		label = "Unavailable"
+	} else if m.lastWorkspaceID != "" {
+		label = m.lastWorkspaceID
+		if item, ok := m.herdrWorkspaces[m.lastWorkspaceID]; ok {
+			if item.Name != "" {
+				label = item.Name
+			} else if item.Path != "" {
+				label = compactHome(item.Path)
+			}
+			path = item.Path
+		}
+	}
+	return label, path
+}
+
+func (m teaModel) lastWorkspaceText() string {
+	label, path := m.lastWorkspaceStatus()
+	line := sectionStyle.Render("LAST WORKSPACE") + countStyle.Render(" · ") + rowLabelStyle.Render(label)
+	displayPath := compactHome(path)
+	if !m.hideLastWorkspacePath && displayPath != "" && displayPath != label {
+		line += pathStyle.Render("  " + displayPath)
+	}
+	return line
+}
+
+func (m teaModel) lastWorkspaceCompactText() string {
+	label, _ := m.lastWorkspaceStatus()
+	return sectionStyle.Render("last:") + rowLabelStyle.Render(" "+label)
+}
+
+// footerLine keeps the keybind help (or a close error, which gets the whole
+// row) intact and fits the last-workspace status into the remaining width,
+// compacting or dropping it rather than truncating the help.
+// footerHelpText shrinks the key hints so the ctrl+u clear hint survives narrow
+// panes, and so the full "LAST WORKSPACE" label keeps its room on the same row
+// rather than being degraded to its compact form by a longer help string.
+func (m teaModel) footerHelpText(width int) string {
+	available := width
+	if m.closeError == "" && !m.hideLastWorkspace {
+		if last := lipgloss.Width(m.lastWorkspaceText()); last > 0 {
+			available -= last + 2
+		}
+	}
+	variants := []string{
+		fmt.Sprintf("enter select · ctrl+j/k · ctrl+r %s · ctrl+x close · ctrl+u clear · esc exit", m.workspaceSort),
+		fmt.Sprintf("enter · ctrl+j/k · ctrl+r %s · ctrl+x close · ctrl+u clear · esc", m.workspaceSort),
+		fmt.Sprintf("enter · ctrl+j/k · ctrl+r %s · ctrl+x · ctrl+u · esc", m.workspaceSort),
+	}
+	for _, variant := range variants {
+		if lipgloss.Width(variant) <= available {
+			return variant
+		}
+	}
+	return variants[len(variants)-1]
+}
+
+func (m teaModel) footerLine(footer string, width int) string {
+	if m.closeError != "" || m.hideLastWorkspace {
+		return fitLine(footer, width)
+	}
+	available := width - lipgloss.Width(footer) - 2
+	last := m.lastWorkspaceText()
+	if lipgloss.Width(last) > available {
+		last = m.lastWorkspaceCompactText()
+	}
+	if lipgloss.Width(last) > available {
+		return fitLine(footer, width)
+	}
+	gap := maxInt(1, width-lipgloss.Width(footer)-lipgloss.Width(last))
+	return fitLine(footer+strings.Repeat(" ", gap)+last, width)
+}
+
 func (m teaModel) previewView(width, maxLines int) string {
 	text := strings.TrimRight(m.preview, "\n")
-	if text == "" {
+	if m.closingWorkspaceID != "" && (m.previewKey == "" || m.quitAfterWorkspaceClose) {
+		text = "Closing workspace..."
+		if m.quitAfterWorkspaceClose {
+			text = "Cancelling workspace close..."
+		}
+	} else if m.previewLoading {
+		text = "Loading preview..."
+	} else if text == "" && m.cancelPreview == nil {
 		text = "No preview available"
 	}
 	text = fixedVisualLines(text, width, maxLines)
@@ -780,6 +1127,12 @@ func (m teaModel) previewView(width, maxLines int) string {
 
 func (m teaModel) previewTitle() string {
 	title := sectionStyle.Render("PREVIEW")
+	if m.panePreview {
+		title = sectionStyle.Render("PANE")
+	}
+	if m.cyclePreviewModeKey != "" {
+		title += countStyle.Render(" [" + m.cyclePreviewModeKey + "]")
+	}
 	current, ok := m.list.Current()
 	if !ok {
 		return title
@@ -791,15 +1144,54 @@ func (m teaModel) previewTitle() string {
 	if label != "" {
 		title += countStyle.Render(" · " + label)
 	}
+	if relation := worktreeDescription(current); relation != "" {
+		title += worktreeRelationStyle.Render(" · " + relation)
+	}
 	if _, status := agentStatusIndicator(current.AgentStatus, m.agentSpinner.View()); status != "" {
 		title += agentStatusStyle(current.AgentStatus).Render(" · " + status)
 	}
 	return title
 }
 
+func (m teaModel) receivePreview(preview previewMsg) (teaModel, tea.Cmd) {
+	if preview.requestID != m.previewRequestID || preview.key != m.previewKey {
+		return m, nil
+	}
+	m.preview = preview.text
+	m.previewLoading = false
+	if m.cancelPreview != nil {
+		m.cancelPreview()
+		m.cancelPreview = nil
+	}
+	if current, ok := m.list.Current(); ok && m.panePreview && !m.hidePreview && current.Source == "herdr" && current.WorkspaceID != "" {
+		return m, tea.Tick(panePreviewRefreshInterval, func(time.Time) tea.Msg {
+			return panePreviewTickMsg{requestID: preview.requestID}
+		})
+	}
+	return m, nil
+}
+
+func (m teaModel) refreshPanePreview(tick panePreviewTickMsg) (teaModel, tea.Cmd) {
+	if tick.requestID != m.previewRequestID || !m.panePreview || m.hidePreview {
+		return m, nil
+	}
+	if current, ok := m.list.Current(); ok {
+		// Keep the last snapshot visible while the next read is in flight.
+		return m.requestPreview(current)
+	}
+	return m, nil
+}
+
 func (m teaModel) refreshPreview() (teaModel, tea.Cmd) {
+	if m.hidePreview {
+		m = m.cancelActivePreview()
+		m.previewKey = ""
+		m.preview = ""
+		return m, nil
+	}
 	current, ok := m.list.Current()
 	if !ok {
+		m = m.cancelActivePreview()
 		m.previewKey = ""
 		m.preview = "No preview available"
 		return m, nil
@@ -808,9 +1200,45 @@ func (m teaModel) refreshPreview() (teaModel, tea.Cmd) {
 	if key == m.previewKey {
 		return m, nil
 	}
-	m.previewKey = key
-	m.preview = "Loading preview..."
-	return m, previewCommand(key, current, m.defaultPreviewCommand)
+	return m.startPreview(current)
+}
+
+func (m teaModel) cancelActivePreview() teaModel {
+	m.previewLoading = false
+	if m.cancelPreview != nil {
+		m.cancelPreview()
+		m.cancelPreview = nil
+	}
+	m.previewRequestID++
+	return m
+}
+
+func (m teaModel) startPreview(s sessionmodel.Session) (teaModel, tea.Cmd) {
+	m, cmd := m.requestPreview(s)
+	return m, tea.Batch(cmd, previewLoadingCommand(m.previewContext, m.previewRequestID))
+}
+
+func previewLoadingCommand(ctx context.Context, requestID uint64) tea.Cmd {
+	return func() tea.Msg {
+		timer := time.NewTimer(500 * time.Millisecond)
+		defer timer.Stop()
+		select {
+		case <-ctx.Done():
+			return nil
+		case <-timer.C:
+			return previewLoadingMsg{requestID: requestID}
+		}
+	}
+}
+
+//nolint:contextcheck // Bubble Tea persists the caller context on the model between messages.
+func (m teaModel) requestPreview(s sessionmodel.Session) (teaModel, tea.Cmd) {
+	m = m.cancelActivePreview()
+	ctx, cancel := context.WithCancel(m.previewParentContext)
+	m.previewContext = ctx
+	m.cancelPreview = cancel
+	m.previewKey = sessionmodel.Key(s)
+	return m, previewCommand(ctx, m.previewKey, m.previewRequestID, s, m.defaultPreviewCommand, m.panePreview)
 }
 
 func (m teaModel) focusList() (teaModel, tea.Cmd) {
@@ -849,7 +1277,9 @@ func (m teaModel) smearToInput() (teaModel, tea.Cmd) {
 
 func (m teaModel) focusSmearDistance() int {
 	visibleRows := m.previewBodyLines()
-	if _, previewWidth := previewLayout(m.contentWidth()); previewWidth == 0 {
+	if m.hidePreview {
+		visibleRows = m.listOnlyBodyLines()
+	} else if _, previewWidth := m.previewLayout(); previewWidth == 0 {
 		visibleRows, _ = m.stackedBodyLines()
 	}
 	start, _, moreAbove, _ := listWindow(len(m.list.Filtered), m.list.Selected, visibleRows)
@@ -987,9 +1417,15 @@ func overlayCell(line string, column int, cell string, width int) string {
 	return fitLine(ansi.Cut(line, 0, column)+cell+ansi.Cut(line, column+1, width), width)
 }
 
-func previewCommand(key string, s sessionmodel.Session, defaultPreviewCommand string) tea.Cmd {
+func previewCommand(ctx context.Context, key string, requestID uint64, s sessionmodel.Session, defaultPreviewCommand string, pane bool) tea.Cmd {
 	return func() tea.Msg {
-		text, err := renderPreview(context.Background(), s, defaultPreviewCommand)
+		var text string
+		var err error
+		if pane {
+			text, err = renderPanePreview(ctx, s)
+		} else {
+			text, err = renderPreview(ctx, s, defaultPreviewCommand)
+		}
 		if err != nil {
 			text = err.Error()
 		}
@@ -997,22 +1433,51 @@ func previewCommand(key string, s sessionmodel.Session, defaultPreviewCommand st
 		if text == "" {
 			text = "No preview available"
 		}
-		return previewMsg{key: key, text: text}
+		return previewMsg{key: key, requestID: requestID, text: text}
 	}
 }
 
-func previewLayout(width int) (int, int) {
-	if width < previewSplitWidth-horizontalPadding*2 {
+func (m teaModel) previewLayout() (int, int) {
+	width := m.contentWidth()
+	if m.hidePreview || width < previewSplitWidth-horizontalPadding*2 {
 		return width, 0
 	}
-	previewWidth := width / 2
-	if previewWidth > maxPreviewWidth {
-		previewWidth = maxPreviewWidth
+	previewWidth := m.previewWidth
+	if previewWidth == 0 {
+		previewWidth = width / 2
+		if !m.hidePath {
+			previewWidth = min(previewWidth, maxPreviewWidth)
+		}
 	}
-	if previewWidth < minPreviewWidth {
-		previewWidth = minPreviewWidth
-	}
+	previewWidth = min(max(previewWidth, minPreviewWidth), width-minListWidth-3)
 	return width - previewWidth - 3, previewWidth
+}
+
+func (m teaModel) resizePreview(msg tea.MouseMsg) teaModel {
+	listWidth, previewWidth := m.previewLayout()
+	if previewWidth == 0 {
+		m.draggingPreview = false
+		return m
+	}
+	switch mouse := msg.(type) {
+	case tea.MouseClickMsg:
+		// joinPanels places the divider after the list and one space.
+		m.draggingPreview = mouse.Button == tea.MouseLeft &&
+			mouse.X == horizontalPadding+listWidth+1 &&
+			mouse.Y >= listFirstRowIndex-previewTitleRows &&
+			mouse.Y < listFirstRowIndex+m.previewBodyLines()
+	case tea.MouseMotionMsg:
+		if mouse.Button != tea.MouseLeft {
+			m.draggingPreview = false
+		}
+		if m.draggingPreview {
+			width := m.contentWidth()
+			m.previewWidth = min(max(width+horizontalPadding-mouse.X-2, minPreviewWidth), width-minListWidth-3)
+		}
+	case tea.MouseReleaseMsg:
+		m.draggingPreview = false
+	}
+	return m
 }
 
 func fixedVisualLines(text string, width, count int) string {
@@ -1034,10 +1499,10 @@ func fixedVisualLines(text string, width, count int) string {
 }
 
 func row(s sessionmodel.Session, selected bool, width int, showIcons bool, query string) string {
-	return rowWithRail(s, selected, width, showIcons, query, selectionRailStyle.Render("┃ "), agentStatusSpinner.Frames[0])
+	return rowWithRail(s, selected, width, showIcons, true, false, query, selectionRailStyle.Render("┃ "), agentStatusSpinner.Frames[0], "")
 }
 
-func rowWithRail(s sessionmodel.Session, selected bool, width int, showIcons bool, query, selectedRail, workingGlyph string) string {
+func rowWithRail(s sessionmodel.Session, selected bool, width int, showIcons, replaceWorktreeIcon, hidePath bool, query, selectedRail, workingGlyph, treePrefix string) string {
 	rail := "  "
 	if selected {
 		rail = selectedRail
@@ -1051,31 +1516,97 @@ func rowWithRail(s sessionmodel.Session, selected bool, width int, showIcons boo
 	if statusGlyph != "" {
 		status = agentStatusStyle(s.AgentStatus).Render(statusGlyph + " ")
 	}
-	badge := sourceBadgeStyle(s.Source).Render(fitPlain(sourceBadge(s.Source, showIcons), rowSourceWidth))
-	remaining := maxInt(1, width-lipgloss.Width(rail)-2-rowSourceWidth)
+	// Status is always two cells: a glyph plus space, or two blanks.
+	fixedWidth := lipgloss.Width(rail) + 2
+	badgeText := sessionSourceBadge(s, showIcons, replaceWorktreeIcon)
+	badgeWidth := rowSourceWidth
+	if s.Worktree.Linked && replaceWorktreeIcon {
+		if width <= fixedWidth+2 {
+			return compactWorktreeRow(rail, status, width, fixedWidth)
+		}
+		badgeWidth = min(rowSourceWidth, maxInt(1, width-fixedWidth-1))
+		if badgeWidth < lipgloss.Width(badgeText) {
+			badgeText = "↳ herdr"
+		}
+	}
+	badge := sessionSourceBadgeStyle(s).Render(fitPlain(badgeText, badgeWidth))
+	remaining := maxInt(1, width-fixedWidth-badgeWidth)
 	path := compactHome(s.Path)
-	showPath := width >= rowPathMinWidth && path != "" && path != label
+	if path == label {
+		path = ""
+	}
+	showSecondary := !hidePath && width >= rowPathMinWidth && path != ""
 	nameWidth := remaining
-	pathWidth := 0
-	if showPath {
+	secondaryWidth := 0
+	if showSecondary {
 		available := maxInt(1, remaining-2)
 		nameWidth = min(rowNameMaxWidth, maxInt(rowNameMinWidth, available*2/5))
 		if nameWidth >= available {
-			showPath = false
+			showSecondary = false
 			nameWidth = remaining
 		} else {
-			pathWidth = available - nameWidth
+			secondaryWidth = available - nameWidth
 		}
 	}
 	labelStyle := rowLabelStyle
 	if selected {
 		labelStyle = selectedLabelStyle
 	}
-	line := rail + status + badge + highlightMatches(label, query, nameWidth, labelStyle)
-	if showPath {
-		line += "  " + highlightMatches(path, query, pathWidth, pathStyle)
+	tree := worktreeMarkerStyle.Render(treePrefix)
+	labelWidth := maxInt(1, nameWidth-lipgloss.Width(tree))
+	line := rail + status + badge + tree + highlightMatches(label, query, labelWidth, labelStyle)
+	if showSecondary {
+		line += "  " + highlightMatches(path, query, secondaryWidth, pathStyle)
 	}
 	return fitLine(line, width) + "\n"
+}
+
+func worktreeTreePrefix(items []sessionmodel.Session, index int) string {
+	if index < 0 || index >= len(items) {
+		return ""
+	}
+	child := items[index]
+	parentID := child.Worktree.ParentWorkspaceID
+	if !child.Worktree.Linked || parentID == "" {
+		return ""
+	}
+	parentIndex := -1
+	for i, item := range items {
+		if item.Source == "herdr" && item.WorkspaceID == parentID {
+			parentIndex = i
+			break
+		}
+	}
+	if parentIndex < 0 || parentIndex >= index {
+		return ""
+	}
+	for i := parentIndex + 1; i < index; i++ {
+		if !items[i].Worktree.Linked || items[i].Worktree.ParentWorkspaceID != parentID {
+			return ""
+		}
+	}
+	if index+1 < len(items) && items[index+1].Worktree.Linked && items[index+1].Worktree.ParentWorkspaceID == parentID {
+		return "├─ "
+	}
+	return "└─ "
+}
+
+func compactWorktreeRow(rail, status string, width, fixedWidth int) string {
+	marker := worktreeMarkerStyle.Render("↳")
+	if width <= fixedWidth {
+		return fitLine(marker, width) + "\n"
+	}
+	return fitLine(rail+status, width-1) + marker + "\n"
+}
+
+func worktreeDescription(s sessionmodel.Session) string {
+	if !s.Worktree.Linked {
+		return ""
+	}
+	if s.Worktree.ParentWorkspaceName != "" {
+		return "worktree of " + s.Worktree.ParentWorkspaceName
+	}
+	return "linked worktree"
 }
 
 func highlightMatches(text, query string, width int, baseStyle lipgloss.Style) string {
@@ -1122,6 +1653,23 @@ func sourceBadge(source string, showIcons bool) string {
 	default:
 		return "[" + source + "]"
 	}
+}
+
+func sessionSourceBadge(s sessionmodel.Session, showIcons, replaceWorktreeIcon bool) string {
+	if s.Source == "herdr" && s.Worktree.Linked && replaceWorktreeIcon {
+		if showIcons {
+			return "↳ herdr"
+		}
+		return "[↳ herdr]"
+	}
+	return sourceBadge(s.Source, showIcons)
+}
+
+func sessionSourceBadgeStyle(s sessionmodel.Session) lipgloss.Style {
+	if s.Source == "herdr" && s.Worktree.Linked {
+		return lipgloss.NewStyle().Foreground(violetColor).Bold(true)
+	}
+	return sourceBadgeStyle(s.Source)
 }
 
 func sourceBadgeStyle(source string) lipgloss.Style {

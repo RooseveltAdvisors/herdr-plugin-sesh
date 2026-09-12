@@ -198,19 +198,19 @@ jobs:
           test "$packaged_version" = "$version"
           test "$("$binary" --version)" = "herdr-sesh ${version}"
           "$binary" list --json \
-            --config testdata/sesh.toml \
+            --config testdata/herdr-sesh.toml \
             >/tmp/herdr-sesh-release-list.json
           test -s /tmp/herdr-sesh-release-list.json
           (cd dist/release && sha256sum -- *.tar.gz > checksums.txt)
 
       - name: Attest build provenance
         if: github.event.repository.visibility == 'public'
-        uses: actions/attest@f7c74d28b9d84cb8768d0b8ca14a4bac6ef463e6 # v4
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4
         with:
           subject-checksums: dist/release/checksums.txt
 
       - name: Generate changelog
-        uses: orhun/git-cliff-action@f50e11560dce63f7c33227798f90b924471a88b5 # v4
+        uses: orhun/git-cliff-action@3d96a18cc4ec17e9dc69ddcc424ccafaf1f78ce2 # v4
         with:
           version: v2.13.1
           config: cliff.toml

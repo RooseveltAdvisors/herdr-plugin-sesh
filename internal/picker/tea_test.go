@@ -3,18 +3,24 @@ package picker
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
+	"testing/synctest"
+	"time"
 	"unicode/utf8"
 
 	"charm.land/bubbles/v2/cursor"
 	"charm.land/bubbles/v2/spinner"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/x/ansi"
-
 	"github.com/fullerzz/herdr-plugin-sesh/internal/model"
 )
 
@@ -25,6 +31,100 @@ func TestMain(m *testing.M) {
 	os.Exit(m.Run())
 }
 
+func TestTeaModelHomePrioritizationOption(t *testing.T) {
+	for _, tc := range []struct {
+		name         string
+		opts         Options
+		wantDisabled bool
+	}{
+		{name: "zero options keep prioritization enabled"},
+		{name: "explicit disable turns prioritization off", opts: Options{DisableHomePrioritization: true}, wantDisabled: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m := newTeaModel(nil, tc.opts)
+			assert.Equal(t, tc.wantDisabled, m.list.DisableHomePrioritization)
+		})
+	}
+}
+
+func TestTeaModelDragsPreviewDivider(t *testing.T) {
+	m := newTeaModel([]model.Session{{Name: "api"}, {Name: "web"}}, Options{})
+	t.Cleanup(func() { m.cancelActivePreview() })
+	m.width, m.height = 120, 28
+	m.list.Selected = 1
+	m.preview = strings.Repeat("preview ", 30)
+	previewID := m.previewRequestID
+	require.Equal(t, tea.MouseModeCellMotion, m.View().MouseMode)
+	for _, step := range []struct {
+		name string
+		msg  tea.Msg
+		x    int
+	}{
+		{"press", tea.MouseClickMsg{X: 64, Y: 5, Button: tea.MouseLeft}, 64},
+		{"widen", tea.MouseMotionMsg{X: 54, Y: 6, Button: tea.MouseLeft}, 54},
+		{"minimum list", tea.MouseMotionMsg{X: 0, Y: 0, Button: tea.MouseLeft}, 39},
+		{"minimum preview", tea.MouseMotionMsg{X: 200, Y: 40, Button: tea.MouseLeft}, 80},
+		{"drag back", tea.MouseMotionMsg{X: 54, Y: 6, Button: tea.MouseLeft}, 54},
+		{"release outside", tea.MouseReleaseMsg{X: 54, Y: 40, Button: tea.MouseLeft}, 54},
+		{"motion after release", tea.MouseMotionMsg{X: 70, Y: 6, Button: tea.MouseLeft}, 54},
+		{"terminal shrinks", tea.WindowSizeMsg{Width: 92, Height: 28}, 39},
+		{"terminal expands", tea.WindowSizeMsg{Width: 120, Height: 28}, 54},
+	} {
+		t.Run(step.name, func(t *testing.T) {
+			updated, cmd := m.Update(step.msg)
+			m = updated.(teaModel)
+			require.Nil(t, cmd)
+			require.Equal(t, previewID, m.previewRequestID)
+			require.Equal(t, 1, m.list.Selected)
+			require.Empty(t, m.input.Value())
+			lines := strings.Split(ansi.Strip(m.View().Content), "\n")
+			for y := 5; y < 5+previewTitleRows+m.previewBodyLines(); y++ {
+				require.Equal(t, "│", ansi.Cut(lines[y], step.x, step.x+1))
+				width := lipgloss.Width(lines[y])
+				require.Equal(t, m.width, width)
+			}
+		})
+	}
+}
+
+func TestTeaModelIgnoresMouseOutsidePreviewDivider(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		width  int
+		hidden bool
+		click  tea.MouseClickMsg
+		after  tea.Msg
+	}{
+		{name: "list", width: 120, click: tea.MouseClickMsg{X: 63, Y: 6, Button: tea.MouseLeft}},
+		{name: "preview", width: 120, click: tea.MouseClickMsg{X: 65, Y: 6, Button: tea.MouseLeft}},
+		{name: "header", width: 120, click: tea.MouseClickMsg{X: 64, Y: 4, Button: tea.MouseLeft}},
+		{name: "footer", width: 120, click: tea.MouseClickMsg{X: 64, Y: 25, Button: tea.MouseLeft}},
+		{name: "right button", width: 120, click: tea.MouseClickMsg{X: 64, Y: 6, Button: tea.MouseRight}},
+		{name: "hidden", width: 120, hidden: true, click: tea.MouseClickMsg{X: 64, Y: 6, Button: tea.MouseLeft}},
+		{name: "stacked", width: 80, click: tea.MouseClickMsg{X: 64, Y: 6, Button: tea.MouseLeft}},
+		{name: "resize cancels drag", width: 120, click: tea.MouseClickMsg{X: 64, Y: 6, Button: tea.MouseLeft}, after: tea.WindowSizeMsg{Width: 120, Height: 28}},
+		{name: "buttonless motion cancels drag", width: 120, click: tea.MouseClickMsg{X: 64, Y: 6, Button: tea.MouseLeft}, after: tea.MouseMotionMsg{X: 64, Y: 6}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m := newTeaModel(nil, Options{HidePreview: tc.hidden})
+			m.width, m.height = tc.width, 28
+			before := m.View()
+			if tc.hidden || tc.width < previewSplitWidth {
+				require.Equal(t, tea.MouseModeNone, before.MouseMode, "mouse reporting enabled without a divider")
+			}
+			updated, _ := m.Update(tc.click)
+			m = updated.(teaModel)
+			if tc.after != nil {
+				updated, _ = m.Update(tc.after)
+				m = updated.(teaModel)
+			}
+			updated, _ = m.Update(tea.MouseMotionMsg{X: 54, Y: 6, Button: tea.MouseLeft})
+			m = updated.(teaModel)
+			assert.Equal(t, before.Content, m.View().Content)
+		})
+	}
+}
+
 func TestTeaModelFiltersMovesAndChooses(t *testing.T) {
 	m := newTeaModel([]model.Session{
 		{Name: "api-service", Path: "/tmp/api"},
@@ -33,14 +133,13 @@ func TestTeaModelFiltersMovesAndChooses(t *testing.T) {
 	updated, _ := m.Update(tea.KeyPressMsg{Code: 'a', Text: "api service"})
 	m = updated.(teaModel)
 	cur, ok := m.list.Current()
-	if !ok || cur.Name != "api-service" {
-		t.Fatalf("current = %#v ok=%v", cur, ok)
-	}
+	require.True(t, ok)
+	require.Equal(t, "api-service", cur.Name)
 	updated, cmd := m.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
 	m = updated.(teaModel)
-	if cmd == nil || !m.chosen || m.choice.Name != "api-service" {
-		t.Fatalf("chosen=%v choice=%#v cmd=%v", m.chosen, m.choice, cmd)
-	}
+	require.NotNil(t, cmd)
+	require.True(t, m.chosen)
+	assert.Equal(t, "api-service", m.choice.Name)
 }
 
 func TestTeaModelMovesSelection(t *testing.T) {
@@ -50,9 +149,8 @@ func TestTeaModelMovesSelection(t *testing.T) {
 	updated, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyDown})
 	m = updated.(teaModel)
 	cur, ok := m.list.Current()
-	if !ok || cur.Name != "web" {
-		t.Fatalf("current = %#v ok=%v", cur, ok)
-	}
+	require.True(t, ok)
+	assert.Equal(t, "web", cur.Name)
 }
 
 func TestTeaModelCtrlJKMovesSelection(t *testing.T) {
@@ -62,18 +160,20 @@ func TestTeaModelCtrlJKMovesSelection(t *testing.T) {
 	m = updated.(teaModel)
 	updated, _ = m.Update(tea.KeyPressMsg{Code: 'j', Mod: tea.ModCtrl})
 	m = updated.(teaModel)
-	if current, ok := m.list.Current(); !ok || current.Name != "web" {
-		t.Fatalf("current = %#v ok=%v, want web", current, ok)
-	}
+	current, ok := m.list.Current()
+	require.True(t, ok)
+	require.Equal(t, "web", current.Name)
 
 	updated, _ = m.Update(tea.KeyPressMsg{Code: 'k', Mod: tea.ModCtrl})
 	m = updated.(teaModel)
-	if current, ok := m.list.Current(); !ok || current.Name != "api" {
-		t.Fatalf("current = %#v ok=%v, want api", current, ok)
-	}
-	if view := ansi.Strip(m.View().Content); !strings.Contains(view, "enter · ctrl+j/k move · ctrl+x close · ctrl+r workspace · ctrl+u clear · esc") {
-		t.Fatalf("default-width view missing complete navigation help:\n%s", view)
-	}
+	current, ok = m.list.Current()
+	require.True(t, ok)
+	require.Equal(t, "api", current.Name)
+	updated, _ = m.Update(tea.WindowSizeMsg{Width: 120, Height: 28})
+	m = updated.(teaModel)
+	view := ansi.Strip(m.View().Content)
+	require.Contains(t, view, "enter select · ctrl+j/k · ctrl+r workspace · ctrl+x close · ctrl+u clear · esc exit")
+	assert.Contains(t, view, "LAST WORKSPACE · None recorded")
 }
 
 func TestTeaModelCtrlKDeletesAfterFilterCursor(t *testing.T) {
@@ -84,9 +184,7 @@ func TestTeaModelCtrlKDeletesAfterFilterCursor(t *testing.T) {
 	updated, _ := m.Update(tea.KeyPressMsg{Code: 'k', Mod: tea.ModCtrl})
 	m = updated.(teaModel)
 
-	if got := m.input.Value(); got != "api" {
-		t.Fatalf("input=%q, want %q", got, "api")
-	}
+	assert.Equal(t, "api", m.input.Value())
 }
 
 func TestTeaModelCtrlXClosesSelectedHerdrWorkspace(t *testing.T) {
@@ -104,31 +202,54 @@ func TestTeaModelCtrlXClosesSelectedHerdrWorkspace(t *testing.T) {
 
 	updated, cmd := m.Update(tea.KeyPressMsg{Code: 'x', Mod: tea.ModCtrl})
 	m = updated.(teaModel)
-	if cmd == nil {
-		t.Fatal("ctrl+x did not return a close command")
-	}
+	require.NotNil(t, cmd)
 	updated, enterCmd := m.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
 	m = updated.(teaModel)
-	if enterCmd != nil || m.chosen {
-		t.Fatalf("closing workspace remained selectable: cmd=%v chosen=%v", enterCmd, m.chosen)
-	}
+	require.Nil(t, enterCmd)
+	require.False(t, m.chosen)
 	m.list.Move(1)
 	m, _ = m.refreshPreview()
 	updated, _ = m.Update(cmd())
 	m = updated.(teaModel)
 
-	if closed != "w1" {
-		t.Fatalf("closed workspace=%q, want w1", closed)
-	}
-	if got, want := sessionNames(m.list.All), []string{"api-selected", "api-other"}; !reflect.DeepEqual(got, want) {
-		t.Fatalf("remaining sessions=%v want %v", got, want)
-	}
-	if current, ok := m.list.Current(); !ok || current.Name != "api-selected" {
-		t.Fatalf("current=%#v ok=%v, want api-selected", current, ok)
-	}
-	if current, _ := m.list.Current(); m.previewKey != model.Key(current) {
-		t.Fatalf("preview key=%q, want selected session %q", m.previewKey, model.Key(current))
-	}
+	require.Equal(t, "w1", closed)
+	require.Equal(t, []string{"api-selected", "api-other"}, sessionNames(m.list.All))
+	current, ok := m.list.Current()
+	require.True(t, ok)
+	assert.Equal(t, "api-selected", current.Name)
+	assert.Equal(t, model.Key(current), m.previewKey)
+}
+
+func TestTeaModelCtrlXUpdatesLastWorkspace(t *testing.T) {
+	m := newTeaModel([]model.Session{
+		{Source: "herdr", Name: "previous", WorkspaceID: "w1"},
+		{Source: "herdr", Name: "older", WorkspaceID: "w2"},
+	}, Options{
+		RecentWorkspaceIDs: []string{"current", "current", "w1", "w2"},
+		LastWorkspaceID:    "w1",
+		HerdrWorkspaces: []model.Session{
+			{Source: "herdr", Name: "previous", WorkspaceID: "w1"},
+			{Source: "herdr", Name: "older", WorkspaceID: "w2"},
+		},
+		CloseWorkspace: func(context.Context, string) error { return nil },
+		ReloadPicker: func(context.Context) (ReloadResult, error) {
+			return ReloadResult{
+				Sessions:        []model.Session{{Source: "herdr", Name: "older", WorkspaceID: "w2"}},
+				HerdrWorkspaces: []model.Session{{Source: "herdr", Name: "older", WorkspaceID: "w2"}},
+				LastWorkspaceID: "w2",
+			}, nil
+		},
+	})
+
+	updated, _ := m.Update(tea.WindowSizeMsg{Width: 120, Height: 28})
+	m = updated.(teaModel)
+	updated, closeCmd := m.Update(tea.KeyPressMsg{Code: 'x', Mod: tea.ModCtrl})
+	m = updated.(teaModel)
+	updated, _ = m.Update(closeCmd())
+	m = updated.(teaModel)
+
+	require.Equal(t, "w2", m.lastWorkspaceID)
+	assert.Contains(t, ansi.Strip(m.View().Content), "LAST WORKSPACE · older")
 }
 
 func TestTeaModelDoesNotQuitWhileWorkspaceCloseIsPending(t *testing.T) {
@@ -156,9 +277,9 @@ func TestTeaModelDoesNotQuitWhileWorkspaceCloseIsPending(t *testing.T) {
 			updated, cmd := m.Update(tt.key)
 			m = updated.(teaModel)
 
-			if cmd != nil || m.chosen || m.closingWorkspaceID != "w1" {
-				t.Fatalf("pending close quit picker: cmd=%v chosen=%v closing=%q", cmd, m.chosen, m.closingWorkspaceID)
-			}
+			require.Nil(t, cmd)
+			require.False(t, m.chosen)
+			assert.Equal(t, "w1", m.closingWorkspaceID)
 		})
 	}
 }
@@ -174,9 +295,9 @@ func TestTeaModelCtrlCCancelsWorkspaceCloseAndQuitsAfterResult(t *testing.T) {
 		}}},
 		{name: "reload", opts: Options{
 			CloseWorkspace: func(context.Context, string) error { return nil },
-			ReloadSessions: func(ctx context.Context) ([]model.Session, error) {
+			ReloadPicker: func(ctx context.Context) (ReloadResult, error) {
 				<-ctx.Done()
-				return nil, ctx.Err()
+				return ReloadResult{}, ctx.Err()
 			},
 		}},
 	}
@@ -193,13 +314,10 @@ func TestTeaModelCtrlCCancelsWorkspaceCloseAndQuitsAfterResult(t *testing.T) {
 
 			updated, quitCmd := m.Update(closeCmd())
 			_ = updated.(teaModel)
-			if quitCmd == nil {
-				t.Fatal("picker did not quit after cancelled close returned")
-			}
+			require.NotNil(t, quitCmd)
 			msg := quitCmd()
-			if _, ok := msg.(tea.QuitMsg); !ok {
-				t.Fatalf("command returned %T, want tea.QuitMsg", msg)
-			}
+			_, ok := msg.(tea.QuitMsg)
+			assert.True(t, ok)
 		})
 	}
 }
@@ -210,11 +328,11 @@ func TestTeaModelCtrlXRestoresDeduplicatedSessionAfterClose(t *testing.T) {
 		{Source: "herdr", Name: "web", WorkspaceID: "w2"},
 	}, Options{
 		CloseWorkspace: func(context.Context, string) error { return nil },
-		ReloadSessions: func(context.Context) ([]model.Session, error) {
-			return []model.Session{
+		ReloadPicker: func(context.Context) (ReloadResult, error) {
+			return ReloadResult{Sessions: []model.Session{
 				{Source: "config", Name: "api", Path: "/configured/api"},
 				{Source: "herdr", Name: "web", WorkspaceID: "w2"},
-			}, nil
+			}}, nil
 		},
 	})
 
@@ -224,12 +342,10 @@ func TestTeaModelCtrlXRestoresDeduplicatedSessionAfterClose(t *testing.T) {
 	updated, _ = m.Update(closeCmd())
 	m = updated.(teaModel)
 
-	if got, want := sessionNames(m.list.All), []string{"api", "web"}; !reflect.DeepEqual(got, want) {
-		t.Fatalf("sessions=%v want %v", got, want)
-	}
-	if current, ok := m.list.Current(); !ok || current.Name != "web" {
-		t.Fatalf("current=%#v ok=%v, want web", current, ok)
-	}
+	require.Equal(t, []string{"api", "web"}, sessionNames(m.list.All))
+	current, ok := m.list.Current()
+	require.True(t, ok)
+	assert.Equal(t, "web", current.Name)
 }
 
 func TestTeaModelCtrlXRetainsActiveWorkspacesWhenReloadFails(t *testing.T) {
@@ -238,7 +354,43 @@ func TestTeaModelCtrlXRetainsActiveWorkspacesWhenReloadFails(t *testing.T) {
 		{Source: "herdr", Name: "web", WorkspaceID: "w2"},
 	}, Options{
 		CloseWorkspace: func(context.Context, string) error { return nil },
-		ReloadSessions: func(context.Context) ([]model.Session, error) { return nil, errors.New("workspace list failed") },
+		ReloadPicker: func(context.Context) (ReloadResult, error) {
+			return ReloadResult{LastWorkspaceUnknown: true}, errors.New("workspace list failed")
+		},
+	})
+
+	updated, _ := m.Update(tea.WindowSizeMsg{Width: 120, Height: 28})
+	m = updated.(teaModel)
+	updated, closeCmd := m.Update(tea.KeyPressMsg{Code: 'x', Mod: tea.ModCtrl})
+	m = updated.(teaModel)
+	updated, _ = m.Update(closeCmd())
+	m = updated.(teaModel)
+
+	require.Equal(t, []string{"web"}, sessionNames(m.list.All))
+	require.Contains(t, ansi.Strip(m.View().Content), "Workspace closed, but sessions could not be refreshed: workspace list failed")
+	updated, _ = m.Update(tea.KeyPressMsg{Code: 'k', Mod: tea.ModCtrl})
+	m = updated.(teaModel)
+	assert.Contains(t, ansi.Strip(m.View().Content), "LAST WORKSPACE · Unavailable")
+}
+
+func TestTeaModelCtrlXClearsClosedParentWhenReloadFails(t *testing.T) {
+	m := newTeaModel([]model.Session{
+		{Source: "herdr", Name: "parent", WorkspaceID: "w-parent"},
+		{
+			Source:      "herdr",
+			Name:        "child",
+			WorkspaceID: "w-child",
+			Worktree: model.WorktreeRelation{
+				Linked:              true,
+				ParentWorkspaceID:   "w-parent",
+				ParentWorkspaceName: "parent",
+			},
+		},
+	}, Options{
+		CloseWorkspace: func(context.Context, string) error { return nil },
+		ReloadPicker: func(context.Context) (ReloadResult, error) {
+			return ReloadResult{LastWorkspaceUnknown: true}, errors.New("workspace list failed")
+		},
 	})
 
 	updated, closeCmd := m.Update(tea.KeyPressMsg{Code: 'x', Mod: tea.ModCtrl})
@@ -246,12 +398,63 @@ func TestTeaModelCtrlXRetainsActiveWorkspacesWhenReloadFails(t *testing.T) {
 	updated, _ = m.Update(closeCmd())
 	m = updated.(teaModel)
 
-	if got, want := sessionNames(m.list.All), []string{"web"}; !reflect.DeepEqual(got, want) {
-		t.Fatalf("sessions=%v want %v", got, want)
-	}
-	if view := ansi.Strip(m.View().Content); !strings.Contains(view, "workspace list failed") {
-		t.Fatalf("view missing reload failure:\n%s", view)
-	}
+	child, ok := m.list.Current()
+	require.True(t, ok)
+	require.True(t, child.Worktree.Linked)
+	require.Empty(t, child.Worktree.ParentWorkspaceID)
+	require.Empty(t, child.Worktree.ParentWorkspaceName)
+	rowText := ansi.Strip(row(child, false, 80, false, ""))
+	require.Contains(t, rowText, "[↳ herdr]")
+	require.NotContains(t, rowText, "worktree of parent")
+	assert.NotContains(t, rowText, "linked worktree")
+}
+
+func TestTeaModelCtrlXRefreshesHerdrMetadataWhenSessionReloadFails(t *testing.T) {
+	m := newTeaModel([]model.Session{
+		{Source: "herdr", Name: "closing", WorkspaceID: "w1"},
+		{Source: "herdr", Name: "old label", WorkspaceID: "w2"},
+	}, Options{
+		LastWorkspaceID: "w2",
+		HerdrWorkspaces: []model.Session{{Source: "herdr", Name: "old label", WorkspaceID: "w2"}},
+		CloseWorkspace:  func(context.Context, string) error { return nil },
+		ReloadPicker: func(context.Context) (ReloadResult, error) {
+			return ReloadResult{
+				HerdrWorkspaces: []model.Session{{Source: "herdr", Name: "new label", WorkspaceID: "w2"}},
+				LastWorkspaceID: "w2",
+			}, errors.New("config refresh failed")
+		},
+	})
+
+	updated, _ := m.Update(tea.WindowSizeMsg{Width: 120, Height: 28})
+	m = updated.(teaModel)
+	updated, closeCmd := m.Update(tea.KeyPressMsg{Code: 'x', Mod: tea.ModCtrl})
+	m = updated.(teaModel)
+	updated, _ = m.Update(closeCmd())
+	m = updated.(teaModel)
+
+	require.Equal(t, []string{"old label"}, sessionNames(m.list.All))
+	updated, _ = m.Update(tea.KeyPressMsg{Code: 'k', Mod: tea.ModCtrl})
+	m = updated.(teaModel)
+	assert.Contains(t, ansi.Strip(m.View().Content), "LAST WORKSPACE · new label")
+}
+
+func TestTeaModelCtrlXGroupsReloadedWorktreeFamily(t *testing.T) {
+	m := newTeaModel([]model.Session{{Source: "herdr", Name: "closing", WorkspaceID: "w-closing"}}, Options{
+		CloseWorkspace: func(context.Context, string) error { return nil },
+		ReloadPicker: func(context.Context) (ReloadResult, error) {
+			return ReloadResult{Sessions: []model.Session{
+				{Source: "herdr", Name: "child", WorkspaceID: "w-child", Worktree: model.WorktreeRelation{Linked: true, ParentWorkspaceID: "w-parent"}},
+				{Source: "herdr", Name: "parent", WorkspaceID: "w-parent"},
+			}}, nil
+		},
+	})
+
+	updated, closeCmd := m.Update(tea.KeyPressMsg{Code: 'x', Mod: tea.ModCtrl})
+	m = updated.(teaModel)
+	updated, _ = m.Update(closeCmd())
+	m = updated.(teaModel)
+
+	assert.Equal(t, []string{"parent", "child"}, sessionNames(m.list.All))
 }
 
 func TestTeaModelCtrlXKeepsWorkspaceWhenCloseFails(t *testing.T) {
@@ -267,20 +470,14 @@ func TestTeaModelCtrlXKeepsWorkspaceWhenCloseFails(t *testing.T) {
 	m.list.Move(1)
 	m, _ = m.refreshPreview()
 	stalePreview := previewMsg{key: m.previewKey, text: "stale preview"}
-	updated, previewCmd := m.Update(cmd())
+	updated, _ = m.Update(cmd())
 	m = updated.(teaModel)
-	if m.preview == "Closing workspace..." {
-		t.Fatalf("failed close left stale preview: cmd=%v", previewCmd)
-	}
+	require.NotEqual(t, "Closing workspace...", m.preview)
 	updated, _ = m.Update(stalePreview)
 	m = updated.(teaModel)
 
-	if len(m.list.All) != 2 {
-		t.Fatalf("workspace removed after close failure: %#v", m.list.All)
-	}
-	if view := ansi.Strip(m.View().Content); !strings.Contains(view, "close failed") {
-		t.Fatalf("view missing close failure after selection and preview changed:\n%s", view)
-	}
+	require.Len(t, m.list.All, 2)
+	assert.Contains(t, ansi.Strip(m.View().Content), "close failed")
 }
 
 func TestTeaModelCtrlXRefreshesPreviewWhenCloseFails(t *testing.T) {
@@ -293,9 +490,8 @@ func TestTeaModelCtrlXRefreshesPreviewWhenCloseFails(t *testing.T) {
 	updated, previewCmd := m.Update(closeCmd())
 	m = updated.(teaModel)
 
-	if previewCmd == nil || m.preview == "Closing workspace..." {
-		t.Fatalf("failed close did not refresh preview: preview=%q cmd=%v", m.preview, previewCmd)
-	}
+	require.NotNil(t, previewCmd)
+	assert.NotEqual(t, "Closing workspace...", m.preview)
 }
 
 func TestTeaModelCtrlXIgnoresNonHerdrSession(t *testing.T) {
@@ -309,9 +505,8 @@ func TestTeaModelCtrlXIgnoresNonHerdrSession(t *testing.T) {
 
 	updated, cmd := m.Update(tea.KeyPressMsg{Code: 'x', Mod: tea.ModCtrl})
 	_ = updated.(teaModel)
-	if cmd != nil || called {
-		t.Fatalf("non-Herdr ctrl+x returned cmd=%v called=%v", cmd, called)
-	}
+	require.Nil(t, cmd)
+	assert.False(t, called)
 }
 
 func TestTeaModelDownTransfersCursorFromFilterToList(t *testing.T) {
@@ -319,41 +514,31 @@ func TestTeaModelDownTransfersCursorFromFilterToList(t *testing.T) {
 	m := newTeaModel([]model.Session{{Name: "workspace-api"}, {Name: "workspace-web"}}, Options{})
 	updated, _ := m.Update(tea.KeyPressMsg{Code: 'w', Text: "work"})
 	m = updated.(teaModel)
-	if view := ansi.Strip(m.listView(40, 2)); strings.Contains(view, "┃") {
-		t.Fatalf("list cursor visible while filter is focused:\n%s", view)
-	}
+	require.NotContains(t, ansi.Strip(m.listView(40, 2)), "┃")
 
 	updated, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyDown})
 	m = updated.(teaModel)
-	if m.input.Focused() {
-		t.Fatal("filter remained focused after moving into the list")
-	}
-	if m.list.Selected != 0 {
-		t.Fatalf("selected row=%d, want first filtered row", m.list.Selected)
-	}
+	require.False(t, m.input.Focused(), "filter remained focused after moving into the list")
+	require.Equal(t, 0, m.list.Selected)
 	lines := strings.Split(ansi.Strip(m.View().Content), "\n")
 	startColumn := visualColumn(lines[3], "┃")
 	wantStartColumn := horizontalPadding + lipgloss.Width(defaultPrompt+"work")
-	if startColumn != wantStartColumn {
-		t.Fatalf("transfer cursor column=%d, want typed-text endpoint %d:\n%s", startColumn, wantStartColumn, strings.Join(lines, "\n"))
-	}
+	require.Equal(t, wantStartColumn, startColumn)
 
 	updated, _ = m.Update(smearTickMsg{})
 	m = updated.(teaModel)
 	lines = strings.Split(ansi.Strip(m.View().Content), "\n")
 	nextColumn := visualColumn(lines[4], "┃")
-	if nextColumn < horizontalPadding || nextColumn >= startColumn {
-		t.Fatalf("transfer cursor did not move down-left: start=%d next=%d\n%s", startColumn, nextColumn, strings.Join(lines, "\n"))
-	}
+	require.GreaterOrEqual(t, nextColumn, horizontalPadding)
+	require.Less(t, nextColumn, startColumn)
 
 	for range 10 {
 		updated, _ = m.Update(smearTickMsg{})
 		m = updated.(teaModel)
 	}
 	view := ansi.Strip(m.View().Content)
-	if strings.Count(view, "┃") != 1 || !strings.Contains(ansi.Strip(m.listView(40, 2)), "┃") {
-		t.Fatalf("cursor did not settle as the single list rail:\n%s", view)
-	}
+	require.Equal(t, 1, strings.Count(view, "┃"))
+	assert.Contains(t, ansi.Strip(m.listView(40, 2)), "┃")
 }
 
 func TestTeaModelUpTransfersCursorFromListToFilter(t *testing.T) {
@@ -370,30 +555,23 @@ func TestTeaModelUpTransfersCursorFromListToFilter(t *testing.T) {
 
 	updated, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyUp})
 	m = updated.(teaModel)
-	if m.input.Focused() {
-		t.Fatal("filter refocused before the reverse smear completed")
-	}
+	require.False(t, m.input.Focused(), "filter refocused before the reverse smear completed")
 	lines := strings.Split(ansi.Strip(m.View().Content), "\n")
 	startColumn := visualColumn(lines[listFirstRowIndex], "┃")
-	if startColumn != horizontalPadding {
-		t.Fatalf("reverse cursor column=%d, want list rail %d:\n%s", startColumn, horizontalPadding, strings.Join(lines, "\n"))
-	}
+	require.Equal(t, horizontalPadding, startColumn)
 
 	updated, _ = m.Update(smearTickMsg{})
 	m = updated.(teaModel)
 	lines = strings.Split(ansi.Strip(m.View().Content), "\n")
 	nextColumn := visualColumn(lines[listFirstRowIndex-1], "┃")
-	if nextColumn <= startColumn {
-		t.Fatalf("reverse cursor did not move up-right: start=%d next=%d\n%s", startColumn, nextColumn, strings.Join(lines, "\n"))
-	}
+	require.Greater(t, nextColumn, startColumn)
 
 	for range 10 {
 		updated, _ = m.Update(smearTickMsg{})
 		m = updated.(teaModel)
 	}
-	if !m.input.Focused() || strings.Contains(ansi.Strip(m.listView(40, 2)), "┃") {
-		t.Fatalf("cursor did not settle in the filter:\n%s", ansi.Strip(m.View().Content))
-	}
+	require.True(t, m.input.Focused())
+	assert.NotContains(t, ansi.Strip(m.listView(40, 2)), "┃")
 }
 
 func TestTeaModelRightTransfersCursorFromListToFilter(t *testing.T) {
@@ -410,16 +588,14 @@ func TestTeaModelRightTransfersCursorFromListToFilter(t *testing.T) {
 
 	updated, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyRight})
 	m = updated.(teaModel)
-	if m.input.Focused() || !m.focusSmearActive || m.focusSmearDirection != -1 {
-		t.Fatalf("right arrow skipped reverse smear: inputFocused=%v active=%v direction=%d", m.input.Focused(), m.focusSmearActive, m.focusSmearDirection)
-	}
+	require.False(t, m.input.Focused())
+	require.True(t, m.focusSmearActive)
+	require.Equal(t, -1, m.focusSmearDirection)
 
 	updated, _ = m.Update(smearTickMsg{})
 	m = updated.(teaModel)
 	lines := strings.Split(ansi.Strip(m.View().Content), "\n")
-	if column := visualColumn(lines[listFirstRowIndex-1], "┃"); column <= horizontalPadding {
-		t.Fatalf("right-arrow cursor did not smear up-right: column=%d\n%s", column, strings.Join(lines, "\n"))
-	}
+	assert.Greater(t, visualColumn(lines[listFirstRowIndex-1], "┃"), horizontalPadding)
 }
 
 func TestTeaModelTypingTransfersCursorFromListToFilter(t *testing.T) {
@@ -431,19 +607,16 @@ func TestTeaModelTypingTransfersCursorFromListToFilter(t *testing.T) {
 
 	updated, _ := m.Update(tea.KeyPressMsg{Code: 'w', Text: "w"})
 	m = updated.(teaModel)
-	if m.input.Value() != "w" || m.list.Query != "w" {
-		t.Fatalf("typed key was not applied during transfer: input=%q query=%q", m.input.Value(), m.list.Query)
-	}
-	if m.input.Focused() || !m.focusSmearActive || m.focusSmearDirection != -1 {
-		t.Fatalf("typing skipped reverse smear: inputFocused=%v active=%v direction=%d", m.input.Focused(), m.focusSmearActive, m.focusSmearDirection)
-	}
+	require.Equal(t, "w", m.input.Value())
+	require.Equal(t, "w", m.list.Query)
+	require.False(t, m.input.Focused())
+	require.True(t, m.focusSmearActive)
+	require.Equal(t, -1, m.focusSmearDirection)
 
 	updated, _ = m.Update(smearTickMsg{})
 	m = updated.(teaModel)
 	lines := strings.Split(ansi.Strip(m.View().Content), "\n")
-	if column := visualColumn(lines[listFirstRowIndex], "┃"); column <= horizontalPadding {
-		t.Fatalf("typed cursor did not smear up-right: column=%d\n%s", column, strings.Join(lines, "\n"))
-	}
+	assert.Greater(t, visualColumn(lines[listFirstRowIndex], "┃"), horizontalPadding)
 }
 
 func TestTeaModelPasteTransfersCursorFromListToFilter(t *testing.T) {
@@ -454,12 +627,11 @@ func TestTeaModelPasteTransfersCursorFromListToFilter(t *testing.T) {
 
 	updated, _ := m.Update(tea.PasteMsg{Content: "workspace"})
 	m = updated.(teaModel)
-	if m.input.Value() != "workspace" || m.list.Query != "workspace" {
-		t.Fatalf("pasted text was not applied during transfer: input=%q query=%q", m.input.Value(), m.list.Query)
-	}
-	if m.input.Focused() || !m.focusSmearActive || m.focusSmearDirection != -1 {
-		t.Fatalf("paste skipped reverse smear: inputFocused=%v active=%v direction=%d", m.input.Focused(), m.focusSmearActive, m.focusSmearDirection)
-	}
+	require.Equal(t, "workspace", m.input.Value())
+	require.Equal(t, "workspace", m.list.Query)
+	require.False(t, m.input.Focused())
+	require.True(t, m.focusSmearActive)
+	assert.Equal(t, -1, m.focusSmearDirection)
 }
 
 func TestTeaModelAcceleratesLongFocusTransfers(t *testing.T) {
@@ -479,9 +651,7 @@ func TestTeaModelAcceleratesLongFocusTransfers(t *testing.T) {
 	m = updated.(teaModel)
 	distance := m.focusSmearSteps
 	wantDistance := listFirstRowIndex + m.list.Selected - filterLineIndex
-	if distance != wantDistance {
-		t.Fatalf("transfer distance=%d, want selected-row distance %d", distance, wantDistance)
-	}
+	require.Equal(t, wantDistance, distance)
 	previousStep := m.focusSmearStep
 	ticks := 0
 	largestAdvance := 0
@@ -493,9 +663,8 @@ func TestTeaModelAcceleratesLongFocusTransfers(t *testing.T) {
 		previousStep = m.focusSmearStep
 	}
 
-	if ticks >= distance || largestAdvance <= 1 {
-		t.Fatalf("long transfer did not accelerate: distance=%d ticks=%d largestAdvance=%d", distance, ticks, largestAdvance)
-	}
+	require.Less(t, ticks, distance)
+	assert.Greater(t, largestAdvance, 1)
 }
 
 func TestTeaModelGooeyReverseTransferEasesOut(t *testing.T) {
@@ -517,9 +686,7 @@ func TestTeaModelGooeyReverseTransferEasesOut(t *testing.T) {
 	for frame := range 3 {
 		lines := strings.Split(ansi.Strip(m.View().Content), "\n")
 		column := visualColumn(lines[listFirstRowIndex-frame], "█")
-		if column < 0 {
-			t.Fatalf("frame %d missing Gooey cursor:\n%s", frame, strings.Join(lines, "\n"))
-		}
+		require.GreaterOrEqual(t, column, 0)
 		columns = append(columns, column)
 		if frame < 2 {
 			updated, _ = m.Update(smearTickMsg{})
@@ -529,9 +696,7 @@ func TestTeaModelGooeyReverseTransferEasesOut(t *testing.T) {
 
 	firstMove := columns[1] - columns[0]
 	secondMove := columns[2] - columns[1]
-	if firstMove <= secondMove {
-		t.Fatalf("reverse Gooey movement accelerated into the input: columns=%v moves=%d,%d", columns, firstMove, secondMove)
-	}
+	assert.Greater(t, firstMove, secondMove)
 }
 
 func TestTeaModelSmearPresets(t *testing.T) {
@@ -562,18 +727,14 @@ func TestTeaModelSmearPresets(t *testing.T) {
 			}
 			transfer := ansi.Strip(m.View().Content)
 			for _, glyph := range append([]string{tt.head}, tt.transferTrail...) {
-				if !strings.Contains(transfer, glyph) {
-					t.Fatalf("%s transfer missing %q:\n%s", tt.name, glyph, transfer)
-				}
+				require.Contains(t, transfer, glyph)
 			}
 
 			for range 10 {
 				updated, _ = m.Update(smearTickMsg{})
 				m = updated.(teaModel)
 			}
-			if view := ansi.Strip(m.listView(40, 6)); !strings.Contains(view, tt.head) {
-				t.Fatalf("%s settled cursor missing %q:\n%s", tt.name, tt.head, view)
-			}
+			require.Contains(t, ansi.Strip(m.listView(40, 6)), tt.head)
 			for range len(items) - 1 {
 				updated, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyDown})
 				m = updated.(teaModel)
@@ -585,9 +746,7 @@ func TestTeaModelSmearPresets(t *testing.T) {
 					trailCells++
 				}
 			}
-			if trailCells != tt.rowTrailCells {
-				t.Fatalf("%s row trail cells=%d, want %d:\n%s", tt.name, trailCells, tt.rowTrailCells, rowView)
-			}
+			assert.Equal(t, tt.rowTrailCells, trailCells)
 		})
 	}
 }
@@ -604,9 +763,7 @@ func TestTeaModelSmearsRapidSelectionMoves(t *testing.T) {
 
 	lines := strings.Split(strings.TrimSuffix(ansi.Strip(m.listView(40, 3)), "\n"), "\n")
 	for i, want := range []string{"╷ ", "│ ", "┃ "} {
-		if !strings.HasPrefix(lines[i], want) {
-			t.Fatalf("row %d = %q, want rail %q\n%s", i, lines[i], want, strings.Join(lines, "\n"))
-		}
+		require.True(t, strings.HasPrefix(lines[i], want))
 	}
 }
 
@@ -621,15 +778,11 @@ func TestTeaModelSmearRetracts(t *testing.T) {
 	m.input.Blur()
 	updated, cmd := m.Update(tea.KeyPressMsg{Code: tea.KeyDown})
 	m = updated.(teaModel)
-	if !strings.HasPrefix(ansi.Strip(m.listView(40, 2)), "╷ ") {
-		t.Fatalf("moving selection did not start the smear:\n%s", ansi.Strip(m.listView(40, 2)))
-	}
+	require.True(t, strings.HasPrefix(ansi.Strip(m.listView(40, 2)), "╷ "))
 
 	msg := cmd()
 	batch, ok := msg.(tea.BatchMsg)
-	if !ok {
-		t.Fatalf("move command = %T, want preview and animation batch", msg)
-	}
+	require.True(t, ok)
 	tickHandled := false
 	for _, child := range batch {
 		msg := child()
@@ -640,12 +793,8 @@ func TestTeaModelSmearRetracts(t *testing.T) {
 		m = updated.(teaModel)
 		tickHandled = true
 	}
-	if !tickHandled {
-		t.Fatal("move batch did not contain an animation tick")
-	}
-	if view := ansi.Strip(m.listView(40, 2)); strings.HasPrefix(view, "╷ ") {
-		t.Fatalf("smear remained after settling:\n%s", view)
-	}
+	require.True(t, tickHandled, "move batch did not contain an animation tick")
+	assert.False(t, strings.HasPrefix(ansi.Strip(m.listView(40, 2)), "╷ "))
 }
 
 func TestTeaModelCapsSmearSettleTime(t *testing.T) {
@@ -663,9 +812,7 @@ func TestTeaModelCapsSmearSettleTime(t *testing.T) {
 	}
 
 	for ticks := 1; m.smearActive; ticks++ {
-		if ticks > 3 {
-			t.Fatalf("smear still active after %d settle ticks", ticks-1)
-		}
+		require.LessOrEqual(t, ticks, 3)
 		updated, _ := m.Update(smearTickMsg{})
 		m = updated.(teaModel)
 	}
@@ -688,9 +835,8 @@ func TestTeaModelQueryChangeClearsSmear(t *testing.T) {
 	m = updated.(teaModel)
 
 	view := ansi.Strip(m.listView(40, 4))
-	if strings.Contains(view, "╵ ") || strings.Contains(view, "│ ") {
-		t.Fatalf("query change left a smear on reordered rows:\n%s", view)
-	}
+	require.NotContains(t, view, "╵ ")
+	assert.NotContains(t, view, "│ ")
 }
 
 func TestTeaModelReducedMotionSkipsSmear(t *testing.T) {
@@ -702,25 +848,19 @@ func TestTeaModelReducedMotionSkipsSmear(t *testing.T) {
 	m = updated.(teaModel)
 
 	current, ok := m.list.Current()
-	if !ok || current.Name != "web" {
-		t.Fatalf("current = %#v ok=%v", current, ok)
-	}
+	require.True(t, ok)
+	require.Equal(t, "web", current.Name)
 	view := ansi.Strip(m.listView(40, 2))
-	if strings.Contains(view, "╷ ") || strings.Contains(view, "│ ") {
-		t.Fatalf("reduced motion rendered a smear:\n%s", view)
-	}
+	require.NotContains(t, view, "╷ ")
+	assert.NotContains(t, view, "│ ")
 }
 
 func TestTeaModelForwardsTextInputNonKeyMessages(t *testing.T) {
 	m := newTeaModel([]model.Session{{Name: "api"}}, Options{})
 	updated, cmd := m.Update(cursor.Blink())
 	m = updated.(teaModel)
-	if cmd == nil {
-		t.Fatal("expected textinput to handle non-key cursor message")
-	}
-	if m.list.Query != m.input.Value() {
-		t.Fatalf("query=%q input=%q", m.list.Query, m.input.Value())
-	}
+	require.NotNil(t, cmd)
+	assert.Equal(t, m.input.Value(), m.list.Query)
 }
 
 func TestTeaModelViewRendersStyledShell(t *testing.T) {
@@ -731,43 +871,232 @@ func TestTeaModelViewRendersStyledShell(t *testing.T) {
 	t.Cleanup(func() { renderPreview = oldPreview })
 
 	m := newTeaModel([]model.Session{
-		{Source: "herdr", Name: "workspace-api", Path: "/tmp/workspace-api", AgentStatus: "working"},
+		{Source: "herdr", Name: "workspace-api", Path: "/tmp/workspace-api", WorkspaceID: "ws-api", AgentStatus: "working"},
 		{Source: "zoxide", Name: "tools", Path: "/tmp/tools"},
 		{Source: "config", Name: "api", Path: "/tmp/api"},
 	}, Options{
-		Prompt:      "Find> ",
-		Placeholder: "Search sessions",
-		ShowIcons:   true,
+		Prompt:          "Find> ",
+		Placeholder:     "Search sessions",
+		ShowIcons:       true,
+		LastWorkspaceID: "ws-api",
+		HerdrWorkspaces: []model.Session{{Source: "herdr", Name: "workspace-api", Path: "/tmp/workspace-api", WorkspaceID: "ws-api"}},
 	})
 	updated, _ := m.Update(tea.WindowSizeMsg{Width: 160, Height: 30})
 	m = updated.(teaModel)
-	updated, _ = m.Update(previewCommand(m.previewKey, m.list.Filtered[m.list.Selected], m.defaultPreviewCommand)())
+	updated, _ = m.Update(previewCommand(m.previewContext, m.previewKey, m.previewRequestID, m.list.Filtered[m.list.Selected], m.defaultPreviewCommand, false)())
 	m = updated.(teaModel)
 	view := ansi.Strip(m.View().Content)
-	for _, want := range []string{"herdr / sesh", "3 workspaces", "Find> ", "Search sessions", "WORKSPACES", "PREVIEW · workspace-api · working", herdrSourceIcon + " herdr", zoxideSourceIcon + " zoxide", configSourceIcon + " config", "api", "preview content", "enter select"} {
-		if !strings.Contains(view, want) {
-			t.Fatalf("view missing %q:\n%s", want, view)
+	for _, want := range []string{"herdr / sesh", "3 workspaces", "Find> ", "Search sessions", "LAST WORKSPACE · workspace-api  /tmp/workspace-api", "WORKSPACES", "PREVIEW [ctrl+o] · workspace-api", herdrSourceIcon + " herdr", zoxideSourceIcon + " zoxide", configSourceIcon + " config", "api", "preview content", "enter select"} {
+		require.Contains(t, view, want)
+	}
+	require.NotContains(t, view, "+-")
+	require.NotContains(t, view, "| ")
+	assert.Equal(t, 160, maxLineWidth(view))
+}
+
+func TestTeaModelViewGroupsAndDescribesWorktreeFamily(t *testing.T) {
+	m := newTeaModel([]model.Session{
+		{
+			Source:      "herdr",
+			Name:        "feature",
+			Path:        "/tmp/project-feature",
+			WorkspaceID: "w-child-a",
+			Worktree: model.WorktreeRelation{
+				Linked:              true,
+				ParentWorkspaceID:   "w-parent",
+				ParentWorkspaceName: "project",
+			},
+		},
+		{Source: "herdr", Name: "project", Path: "/tmp/project", WorkspaceID: "w-parent"},
+		{
+			Source:      "herdr",
+			Name:        "docs",
+			Path:        "/tmp/project-docs",
+			WorkspaceID: "w-child-b",
+			Worktree: model.WorktreeRelation{
+				Linked:              true,
+				ParentWorkspaceID:   "w-parent",
+				ParentWorkspaceName: "project",
+			},
+		},
+	}, Options{})
+	m.list.Selected = 1
+	m.preview = "preview content"
+	updated, _ := m.Update(tea.WindowSizeMsg{Width: 160, Height: 28})
+	m = updated.(teaModel)
+
+	view := ansi.Strip(m.View().Content)
+	parentLine, firstChildLine, lastChildLine := -1, -1, -1
+	for i, line := range strings.Split(view, "\n") {
+		if strings.Contains(line, "[herdr]") && strings.Contains(line, "project") && !strings.Contains(line, "↳") {
+			parentLine = i
+		}
+		if strings.Contains(line, "[↳ herdr]") && strings.Contains(line, "├─ feature") {
+			firstChildLine = i
+		}
+		if strings.Contains(line, "[↳ herdr]") && strings.Contains(line, "└─ docs") {
+			lastChildLine = i
 		}
 	}
-	if strings.Contains(view, "+-") || strings.Contains(view, "| ") {
-		t.Fatalf("view still contains ASCII box chrome:\n%s", view)
+	require.GreaterOrEqual(t, parentLine, 0)
+	require.Equal(t, parentLine+1, firstChildLine)
+	require.Equal(t, firstChildLine+1, lastChildLine)
+	require.Contains(t, view, "PREVIEW [ctrl+o] · feature · worktree of project")
+	require.Equal(t, 160, maxLineWidth(view))
+	assert.Equal(t, 28, lipgloss.Height(view))
+}
+
+func TestWorktreeTreePrefixRequiresContiguousVisibleFamily(t *testing.T) {
+	items := []model.Session{
+		{Source: "herdr", Name: "parent", WorkspaceID: "w-parent"},
+		{Source: "zoxide", Name: "unrelated"},
+		{Source: "herdr", Name: "child", WorkspaceID: "w-child", Worktree: model.WorktreeRelation{Linked: true, ParentWorkspaceID: "w-parent"}},
 	}
-	if got, want := maxLineWidth(view), 160; got != want {
-		t.Fatalf("view width=%d, want %d:\n%s", got, want, view)
+
+	assert.Empty(t, worktreeTreePrefix(items, 2))
+}
+
+func TestListViewKeepsWorktreeBranchWhenParentIsOffScreen(t *testing.T) {
+	m := newTeaModel([]model.Session{
+		{Source: "herdr", Name: "parent", WorkspaceID: "w-parent"},
+		{Source: "herdr", Name: "child", WorkspaceID: "w-child", Worktree: model.WorktreeRelation{Linked: true, ParentWorkspaceID: "w-parent"}},
+	}, Options{})
+	m.list.Selected = 1
+
+	view := ansi.Strip(m.listView(80, 1))
+	assert.Contains(t, view, "└─ child")
+}
+
+func TestTeaModelLastWorkspaceFallsBackToRecordedID(t *testing.T) {
+	m := newTeaModel([]model.Session{{Source: "herdr", Name: "current", WorkspaceID: "current"}}, Options{LastWorkspaceID: "unavailable-workspace"})
+	updated, _ := m.Update(tea.WindowSizeMsg{Width: 120, Height: 28})
+	m = updated.(teaModel)
+
+	view := ansi.Strip(m.View().Content)
+	assert.Contains(t, view, "LAST WORKSPACE · unavailable-workspace")
+}
+
+func TestTeaModelLastWorkspaceUsesRawHerdrMetadata(t *testing.T) {
+	m := newTeaModel([]model.Session{{Source: "config", Name: "api", Path: "/configured/api"}}, Options{
+		LastWorkspaceID: "ws-api",
+		HerdrWorkspaces: []model.Session{{Source: "herdr", Name: "api", Path: "/live/api", WorkspaceID: "ws-api"}},
+	})
+	updated, _ := m.Update(tea.WindowSizeMsg{Width: 120, Height: 28})
+	m = updated.(teaModel)
+
+	view := ansi.Strip(m.View().Content)
+	assert.Contains(t, view, "LAST WORKSPACE · api  /live/api")
+}
+
+func TestTeaModelCanHideLastWorkspacePath(t *testing.T) {
+	m := newTeaModel(nil, Options{
+		HideLastWorkspacePath: true,
+		LastWorkspaceID:       "ws-api",
+		HerdrWorkspaces:       []model.Session{{Source: "herdr", Name: "api", Path: "/live/api", WorkspaceID: "ws-api"}},
+	})
+	updated, _ := m.Update(tea.WindowSizeMsg{Width: 160, Height: 24})
+	m = updated.(teaModel)
+
+	view := ansi.Strip(m.View().Content)
+	require.Contains(t, view, "LAST WORKSPACE · api")
+	assert.NotContains(t, view, "/live/api")
+}
+
+func TestTeaModelCanHideLastWorkspace(t *testing.T) {
+	m := newTeaModel(nil, Options{
+		HideLastWorkspace: true,
+		LastWorkspaceID:   "ws-api",
+		HerdrWorkspaces:   []model.Session{{Source: "herdr", Name: "api", Path: "/live/api", WorkspaceID: "ws-api"}},
+	})
+	updated, _ := m.Update(tea.WindowSizeMsg{Width: 160, Height: 24})
+	m = updated.(teaModel)
+
+	view := ansi.Strip(m.View().Content)
+	require.NotContains(t, view, "LAST WORKSPACE")
+	require.NotContains(t, view, "last: api")
+	assert.NotContains(t, view, "/live/api")
+}
+
+func TestTeaModelLastWorkspaceSharesFooterWithKeybinds(t *testing.T) {
+	m := newTeaModel(nil, Options{LastWorkspaceID: "ws-api"})
+	updated, _ := m.Update(tea.WindowSizeMsg{Width: 120, Height: 24})
+	m = updated.(teaModel)
+
+	view := ansi.Strip(m.View().Content)
+	for _, line := range strings.Split(view, "\n") {
+		if strings.Contains(line, "LAST WORKSPACE") {
+			require.Contains(t, line, "enter select")
+			require.True(t, strings.HasSuffix(strings.TrimSpace(line), "LAST WORKSPACE · ws-api"))
+			return
+		}
 	}
+	require.FailNow(t, fmt.Sprintf("view missing last workspace footer:\n%s", view))
+}
+
+func TestFooterLinePrioritizesKeybindHelpAtNarrowWidths(t *testing.T) {
+	m := newTeaModel(nil, Options{
+		LastWorkspaceID: "ws-api",
+		HerdrWorkspaces: []model.Session{{Source: "herdr", Name: "a-rather-long-workspace-name", Path: "/home/test/some/deep/project/path", WorkspaceID: "ws-api"}},
+	})
+	help := helpStyle.Render("enter select · ctrl+j/k · ctrl+r workspace · ctrl+x close · esc exit")
+	for _, width := range []int{10, 20, 40, 80, 120} {
+		line := m.footerLine(help, width)
+		require.Equal(t, width, lipgloss.Width(line))
+		if width >= lipgloss.Width(help) {
+			assert.Contains(t, ansi.Strip(line), "esc exit")
+		}
+	}
+}
+
+func TestFooterLineCompactsLastWorkspaceBeforeDroppingIt(t *testing.T) {
+	m := newTeaModel(nil, Options{
+		LastWorkspaceID: "api",
+		HerdrWorkspaces: []model.Session{{Source: "herdr", Name: "api", Path: "/some/long/path/to/the/project", WorkspaceID: "api"}},
+	})
+	help := helpStyle.Render("enter select · ctrl+j/k · ctrl+r workspace · ctrl+x close · esc exit")
+	line := ansi.Strip(m.footerLine(help, 80))
+	require.Contains(t, line, "last: api")
+	require.NotContains(t, line, "LAST WORKSPACE")
+	assert.Contains(t, line, "esc exit")
+}
+
+func TestFooterLineGivesCloseErrorWholeRow(t *testing.T) {
+	m := newTeaModel(nil, Options{LastWorkspaceID: "ws-api"})
+	m.closeError = "Failed to close workspace: herdr workspace close w1: boom"
+	line := ansi.Strip(m.footerLine(emptyStyle.Render(m.closeError), 80))
+	require.Contains(t, line, "close w1: boom")
+	require.NotContains(t, line, "LAST WORKSPACE")
+	assert.NotContains(t, line, "last:")
+}
+
+func TestTeaModelLastWorkspaceUnavailable(t *testing.T) {
+	m := newTeaModel(nil, Options{LastWorkspaceUnknown: true})
+	updated, _ := m.Update(tea.WindowSizeMsg{Width: 120, Height: 28})
+	m = updated.(teaModel)
+
+	assert.Contains(t, ansi.Strip(m.View().Content), "LAST WORKSPACE · Unavailable")
+}
+
+func TestTeaModelUnnamedLastWorkspaceDoesNotRepeatCompactedPath(t *testing.T) {
+	t.Setenv("HOME", "/home/test")
+	m := newTeaModel(nil, Options{
+		LastWorkspaceID: "ws-api",
+		HerdrWorkspaces: []model.Session{{Source: "herdr", Path: "/home/test/api", WorkspaceID: "ws-api"}},
+	})
+	updated, _ := m.Update(tea.WindowSizeMsg{Width: 120, Height: 28})
+	m = updated.(teaModel)
+
+	view := ansi.Strip(m.View().Content)
+	assert.Equal(t, 1, strings.Count(view, "~/api"))
 }
 
 func TestTeaModelShowIconsControlsSourceIcons(t *testing.T) {
 	items := []model.Session{{Source: "herdr", Name: "api"}}
 	withoutIcons := ansi.Strip(newTeaModel(items, Options{}).View().Content)
-	if strings.Contains(withoutIcons, herdrSourceIcon) {
-		t.Fatalf("view unexpectedly contains source icon:\n%s", withoutIcons)
-	}
+	require.NotContains(t, withoutIcons, herdrSourceIcon)
 
 	withIcons := ansi.Strip(newTeaModel(items, Options{ShowIcons: true}).View().Content)
-	if !strings.Contains(withIcons, herdrSourceIcon+" herdr") {
-		t.Fatalf("view missing source icon:\n%s", withIcons)
-	}
+	assert.Contains(t, withIcons, herdrSourceIcon+" herdr")
 }
 
 func TestRowUsesSourceCategoryColors(t *testing.T) {
@@ -782,10 +1111,43 @@ func TestRowUsesSourceCategoryColors(t *testing.T) {
 	}
 	for _, tt := range tests {
 		got := row(model.Session{Source: tt.source, Name: tt.source}, false, 80, true, "")
-		if !strings.Contains(got, tt.color) {
-			t.Fatalf("row for source %q missing color %s:\n%q", tt.source, tt.color, got)
-		}
+		require.Contains(t, got, tt.color)
 	}
+}
+
+func TestChildWorktreeUsesPurpleTypeBadge(t *testing.T) {
+	s := model.Session{Source: "herdr", Name: "feature", Worktree: model.WorktreeRelation{Linked: true}}
+
+	withoutIcons := row(s, false, 80, false, "")
+	plain := ansi.Strip(withoutIcons)
+	require.Contains(t, plain, "[↳ herdr]")
+	require.NotContains(t, plain, "↳ feature")
+	require.Contains(t, withoutIcons, "38;2;187;154;247")
+	require.NotContains(t, withoutIcons, "38;2;125;207;255")
+
+	withIcons := ansi.Strip(row(s, false, 80, true, ""))
+	require.Contains(t, withIcons, "↳ herdr")
+	require.NotContains(t, withIcons, herdrSourceIcon)
+	assert.NotContains(t, withIcons, "↳ feature")
+}
+
+func TestChildWorktreeIconReplacementCanBeDisabled(t *testing.T) {
+	items := []model.Session{
+		{Source: "herdr", Name: "project", WorkspaceID: "w-parent"},
+		{Source: "herdr", Name: "feature", WorkspaceID: "w-child", Worktree: model.WorktreeRelation{Linked: true, ParentWorkspaceID: "w-parent"}},
+	}
+	m := newTeaModel(items, Options{ShowIcons: true, DisableWorktreeIconReplacement: true})
+	withIcons := m.listView(80, 2)
+	plain := ansi.Strip(withIcons)
+	require.Contains(t, plain, herdrSourceIcon+" herdr")
+	require.Contains(t, plain, "└─ feature")
+	require.NotContains(t, plain, "↳")
+	require.Contains(t, withIcons, "38;2;187;154;247")
+
+	m = newTeaModel(items, Options{DisableWorktreeIconReplacement: true})
+	withoutIcons := ansi.Strip(m.listView(80, 2))
+	require.Contains(t, withoutIcons, "[herdr]")
+	assert.NotContains(t, withoutIcons, "↳")
 }
 
 func TestRowUsesAgentStatusIndicators(t *testing.T) {
@@ -801,15 +1163,12 @@ func TestRowUsesAgentStatusIndicators(t *testing.T) {
 	}
 	for _, tt := range tests {
 		got := row(model.Session{Source: "herdr", Name: "api", AgentStatus: tt.status}, false, 80, true, "")
-		if !strings.Contains(ansi.Strip(got), tt.glyph) || !strings.Contains(got, tt.color) {
-			t.Fatalf("row for status %q missing glyph/color:\n%q", tt.status, got)
-		}
+		require.Contains(t, ansi.Strip(got), tt.glyph)
+		require.Contains(t, got, tt.color)
 	}
 	for _, status := range []string{"", "unknown", "future"} {
 		got := ansi.Strip(row(model.Session{Source: "herdr", Name: "api", AgentStatus: status}, false, 80, true, ""))
-		if strings.ContainsAny(got, "⢄◉✓●") {
-			t.Fatalf("row for status %q unexpectedly contains indicator: %q", status, got)
-		}
+		require.False(t, strings.ContainsAny(got, "⢄◉✓●"))
 	}
 }
 
@@ -821,23 +1180,17 @@ func TestTeaModelAnimatesWorkingAgentStatusIndicator(t *testing.T) {
 	m = updated.(teaModel)
 	after := ansi.Strip(m.listView(80, 1))
 
-	if !strings.Contains(before, "⢄") || !strings.Contains(after, "⢂") {
-		t.Fatalf("working indicator did not advance jump frame:\nbefore: %q\nafter:  %q", before, after)
-	}
-	if cmd == nil {
-		t.Fatal("working indicator did not schedule its next jump frame")
-	}
+	require.Contains(t, before, "⢄")
+	require.Contains(t, after, "⢂")
+	require.NotNil(t, cmd)
 }
 
 func TestTeaModelStartsAgentStatusSpinner(t *testing.T) {
 	m := newTeaModel(nil, Options{RefreshAgentStatuses: func() (map[string]string, error) { return nil, nil }})
 	batch, ok := m.Init()().(tea.BatchMsg)
-	if !ok || len(batch) == 0 {
-		t.Fatalf("init command = %#v, want batch", batch)
-	}
-	if msg := batch[len(batch)-1](); reflect.TypeOf(msg) != reflect.TypeOf(spinner.TickMsg{}) {
-		t.Fatalf("last init message = %T, want spinner.TickMsg", msg)
-	}
+	require.True(t, ok)
+	require.NotEmpty(t, batch)
+	assert.Equal(t, reflect.TypeOf(spinner.TickMsg{}), reflect.TypeOf(batch[len(batch)-1]()))
 }
 
 func TestRowCompactsHomeAndNeverWraps(t *testing.T) {
@@ -849,42 +1202,452 @@ func TestRowCompactsHomeAndNeverWraps(t *testing.T) {
 		AgentStatus: "working",
 	}
 	wide := ansi.Strip(strings.TrimSuffix(row(s, true, 76, true, ""), "\n"))
-	if strings.Contains(wide, "\n") || lipgloss.Width(wide) != 76 {
-		t.Fatalf("wide row width=%d or wrapped:\n%q", lipgloss.Width(wide), wide)
-	}
-	if !strings.Contains(wide, "~/Code/Go/") || strings.Contains(wide, "/Users/picker") {
-		t.Fatalf("wide row did not compact home path: %q", wide)
-	}
+	require.NotContains(t, wide, "\n")
+	require.Equal(t, 76, lipgloss.Width(wide))
+	require.Contains(t, wide, "~/Code/Go/")
+	require.NotContains(t, wide, "/Users/picker")
 	narrow := ansi.Strip(strings.TrimSuffix(row(s, false, 48, true, ""), "\n"))
-	if strings.Contains(narrow, "~/") || strings.Contains(narrow, "/Users/picker") {
-		t.Fatalf("narrow row should omit its path: %q", narrow)
+	require.NotContains(t, narrow, "~/")
+	require.NotContains(t, narrow, "/Users/picker")
+	require.NotContains(t, narrow, "\n")
+	assert.Equal(t, 48, lipgloss.Width(narrow))
+}
+
+func TestRowShowsWorktreePathWithoutParentDescription(t *testing.T) {
+	s := model.Session{
+		Source:      "herdr",
+		Name:        "feature",
+		Path:        "/tmp/project-feature",
+		AgentStatus: "blocked",
+		Worktree: model.WorktreeRelation{
+			Linked:              true,
+			ParentWorkspaceID:   "w-parent",
+			ParentWorkspaceName: "project",
+		},
 	}
-	if strings.Contains(narrow, "\n") || lipgloss.Width(narrow) != 48 {
-		t.Fatalf("narrow row width=%d or wrapped: %q", lipgloss.Width(narrow), narrow)
+
+	wide := row(s, true, 100, true, "")
+	widePlain := ansi.Strip(strings.TrimSuffix(wide, "\n"))
+	for _, want := range []string{"┃", "◉", "↳ herdr", "feature", "/tmp/project-feature"} {
+		require.Contains(t, widePlain, want)
 	}
+	require.NotContains(t, widePlain, "worktree of")
+	require.NotContains(t, widePlain, herdrSourceIcon)
+	require.Equal(t, 100, lipgloss.Width(widePlain))
+	require.NotContains(t, widePlain, "\n")
+
+	narrow := row(s, false, 48, false, "")
+	narrowPlain := ansi.Strip(strings.TrimSuffix(narrow, "\n"))
+	require.Contains(t, narrowPlain, "[↳ herdr]")
+	require.Contains(t, narrowPlain, "feature")
+	require.NotContains(t, narrowPlain, "↳ feature")
+	require.NotContains(t, narrowPlain, "worktree of")
+	require.NotContains(t, narrowPlain, "/tmp/project-feature")
+	require.Equal(t, 48, lipgloss.Width(narrowPlain))
+	assert.NotContains(t, narrowPlain, "\n")
+}
+
+func TestRowPreservesWorktreeMarkerAtCompactBoundary(t *testing.T) {
+	s := model.Session{
+		Source:      "herdr",
+		Name:        "feature",
+		AgentStatus: "working",
+		Worktree:    model.WorktreeRelation{Linked: true, ParentWorkspaceName: "project"},
+	}
+	for _, showIcons := range []bool{false, true} {
+		for _, width := range []int{1, 4, 5, 6, 10, 14, 15, 16} {
+			got := ansi.Strip(strings.TrimSuffix(row(s, true, width, showIcons, ""), "\n"))
+			require.Contains(t, got, "↳")
+			require.Equal(t, width, lipgloss.Width(got))
+			require.NotContains(t, got, "\n")
+		}
+	}
+}
+
+func TestRowUsesBadgeWithoutDescriptionWhenWorktreeParentIsUnresolved(t *testing.T) {
+	got := ansi.Strip(row(model.Session{
+		Source:   "herdr",
+		Name:     "feature",
+		Worktree: model.WorktreeRelation{Linked: true},
+	}, false, 80, false, ""))
+	require.Contains(t, got, "[↳ herdr]")
+	require.Contains(t, got, "feature")
+	require.NotContains(t, got, "linked worktree")
+	require.NotContains(t, got, "worktree of")
+	assert.NotContains(t, got, "↳ feature")
+}
+
+func TestRowDoesNotMarkNormalWorkspace(t *testing.T) {
+	got := ansi.Strip(row(model.Session{Source: "herdr", Name: "project", Path: "/tmp/project"}, false, 80, false, ""))
+	require.NotContains(t, got, "↳")
+	assert.NotContains(t, got, "worktree")
+}
+
+func TestPreviewTitleShowsUnresolvedLinkedWorktree(t *testing.T) {
+	m := newTeaModel([]model.Session{{
+		Source:   "herdr",
+		Name:     "feature",
+		Worktree: model.WorktreeRelation{Linked: true},
+	}}, Options{})
+
+	got := ansi.Strip(m.previewTitle())
+	require.Contains(t, got, "PREVIEW [ctrl+o] · feature · linked worktree")
+	assert.NotContains(t, got, "worktree of")
+}
+
+func TestPreviewTitleShowsWorktreeParentBeforeAgentStatus(t *testing.T) {
+	m := newTeaModel([]model.Session{
+		{Source: "herdr", Name: "parent", WorkspaceID: "w-parent"},
+		{
+			Source:      "herdr",
+			Name:        "feature",
+			WorkspaceID: "w-child",
+			AgentStatus: "working",
+			Worktree: model.WorktreeRelation{
+				Linked:              true,
+				ParentWorkspaceID:   "w-parent",
+				ParentWorkspaceName: "parent",
+			},
+		},
+	}, Options{})
+	m.list.Selected = 1
+
+	got := ansi.Strip(m.previewTitle())
+	assert.Contains(t, got, "PREVIEW [ctrl+o] · feature · worktree of parent · working")
+}
+
+// Follow preview batches without waiting for their independent loading timers.
+//
+//nolint:ireturn // Bubble Tea commands return messages through this interface.
+func previewResult(cmd tea.Cmd) tea.Msg {
+	msg := cmd()
+	if batch, ok := msg.(tea.BatchMsg); ok {
+		return previewResult(batch[0])
+	}
+	return msg
+}
+
+func TestPreviewLoadingDelayResetsAndStops(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		m := newTeaModel([]model.Session{{Name: "api"}, {Name: "web"}}, Options{})
+		defer func() { m.cancelActivePreview() }()
+		assert.NotContains(t, m.previewView(80, 5), "Loading preview")
+		assert.NotContains(t, m.previewView(80, 5), "No preview available")
+		m.preview = "last completed preview"
+		result := make(chan tea.Msg, 1)
+		ctx, id := m.previewContext, m.previewRequestID
+		go func() { result <- previewLoadingCommand(ctx, id)() }()
+		synctest.Wait()
+		time.Sleep(499 * time.Millisecond)
+		select {
+		case <-result:
+			t.Fatal("loading message arrived before 500ms")
+		default:
+		}
+		m.list.Move(1)
+		m, cmd := m.refreshPreview()
+		require.Nil(t, <-result, "selection change must cancel the old timer")
+		batch, ok := cmd().(tea.BatchMsg)
+		require.True(t, ok)
+		require.Len(t, batch, 2)
+		timerCmd := batch[1]
+		go func() { result <- timerCmd() }()
+		synctest.Wait()
+		time.Sleep(499 * time.Millisecond)
+		updated, _ := m.Update(previewLoadingMsg{requestID: id})
+		m = updated.(teaModel)
+		assert.Contains(t, m.previewView(80, 5), "last completed preview")
+		select {
+		case <-result:
+			t.Fatal("replacement timer did not reset the delay")
+		default:
+		}
+		time.Sleep(time.Millisecond)
+		loading := <-result
+		updated, _ = m.Update(loading)
+		m = updated.(teaModel)
+		assert.Contains(t, m.previewView(80, 5), "Loading preview")
+		m.list.Move(-1)
+		m, cmd = m.refreshPreview()
+		assert.Contains(t, m.previewView(80, 5), "last completed preview")
+		batch = cmd().(tea.BatchMsg)
+		nextTimerCmd := batch[1]
+		go func() { result <- nextTimerCmd() }()
+		synctest.Wait()
+		completedID := m.previewRequestID
+		updated, _ = m.Update(previewMsg{key: m.previewKey, requestID: completedID, text: "new preview"})
+		m = updated.(teaModel)
+		require.Nil(t, <-result, "completion must cancel the timer")
+		for _, msg := range []tea.Msg{loading, previewLoadingMsg{requestID: completedID}} {
+			updated, _ = m.Update(msg)
+			m = updated.(teaModel)
+			assert.Contains(t, m.previewView(80, 5), "new preview")
+			assert.NotContains(t, m.previewView(80, 5), "Loading preview")
+		}
+	})
 }
 
 func TestTeaModelPreviewUsesConfiguredCommand(t *testing.T) {
 	m := newTeaModel([]model.Session{{Name: "api", Path: "/tmp/api"}}, Options{DefaultPreviewCommand: "printf preview:%s {}"})
-	msg := previewCommand(m.previewKey, m.list.Filtered[m.list.Selected], m.defaultPreviewCommand)()
+	msg := previewCommand(m.previewContext, m.previewKey, m.previewRequestID, m.list.Filtered[m.list.Selected], m.defaultPreviewCommand, false)()
 	preview := msg.(previewMsg)
-	if got := strings.TrimSpace(preview.text); got != "preview:/tmp/api" {
-		t.Fatalf("preview=%q", preview.text)
+	assert.Equal(t, "preview:/tmp/api", strings.TrimSpace(preview.text))
+}
+
+func TestTeaModelHidePreviewDoesNotRunInitialPreview(t *testing.T) {
+	marker := filepath.Join(t.TempDir(), "preview-ran")
+	m := newTeaModel([]model.Session{{Name: "api", Path: "/tmp/api"}}, Options{
+		HidePreview:           true,
+		DefaultPreviewCommand: fmt.Sprintf("touch %q", marker),
+	})
+
+	executeTeaCommand(m.Init())
+	_, err := os.Stat(marker)
+	require.ErrorIs(t, err, os.ErrNotExist)
+}
+
+func TestTeaModelHidePreviewDoesNotRefreshAfterSelection(t *testing.T) {
+	t.Setenv("HERDR_SESH_REDUCE_MOTION", "1")
+	marker := filepath.Join(t.TempDir(), "preview-ran")
+	m := newTeaModel([]model.Session{{Name: "api", Path: "/tmp/api"}, {Name: "web", Path: "/tmp/web"}}, Options{
+		HidePreview:           true,
+		DefaultPreviewCommand: fmt.Sprintf("touch %q", marker),
+	})
+	m.listFocused = true
+
+	updated, cmd := m.Update(tea.KeyPressMsg{Code: tea.KeyDown})
+	m = updated.(teaModel)
+	executeTeaCommand(cmd)
+	_, err := os.Stat(marker)
+	require.ErrorIs(t, err, os.ErrNotExist)
+}
+
+func executeTeaCommand(cmd tea.Cmd) {
+	if cmd == nil {
+		return
+	}
+	msg := cmd()
+	batch, ok := msg.(tea.BatchMsg)
+	if !ok {
+		return
+	}
+	for _, child := range batch {
+		if child != nil {
+			executeTeaCommand(child)
+		}
 	}
 }
 
 func TestTeaModelRefreshesPreviewWhenSelectionChanges(t *testing.T) {
 	m := newTeaModel([]model.Session{{Name: "api", Path: "/tmp/api"}, {Name: "web", Path: "/tmp/web"}}, Options{})
+	m.preview = "api preview"
 	updated, _ := m.Update(tea.KeyPressMsg{Code: tea.KeyDown})
 	m = updated.(teaModel)
 	updated, cmd := m.Update(tea.KeyPressMsg{Code: tea.KeyDown})
 	m = updated.(teaModel)
-	if cmd == nil || !strings.Contains(m.preview, "Loading preview") {
-		t.Fatalf("cmd=%v preview=%q", cmd, m.preview)
-	}
+	require.NotNil(t, cmd)
+	require.Equal(t, "api preview", m.preview)
 	current, ok := m.list.Current()
-	if !ok || current.Name != "web" || m.previewKey != model.Key(current) {
-		t.Fatalf("current=%#v ok=%v previewKey=%q", current, ok, m.previewKey)
+	require.True(t, ok)
+	require.Equal(t, "web", current.Name)
+	assert.Equal(t, model.Key(current), m.previewKey)
+}
+
+func TestTeaModelCancelsSupersededPreview(t *testing.T) {
+	firstStarted := make(chan struct{})
+	firstCanceled := make(chan struct{})
+	secondStarted := make(chan struct{})
+	releaseSecond := make(chan struct{})
+	previewErr := make(chan error, 1)
+	oldPreview := renderPreview
+	renderPreview = func(ctx context.Context, s model.Session, _ string) (string, error) {
+		switch s.Name {
+		case "api":
+			close(firstStarted)
+			<-ctx.Done()
+			close(firstCanceled)
+			return "", ctx.Err()
+		case "web":
+			close(secondStarted)
+			<-releaseSecond
+			return "web preview", nil
+		default:
+			err := fmt.Errorf("unexpected preview for %q", s.Name)
+			previewErr <- err
+			return "", err
+		}
+	}
+	t.Cleanup(func() { renderPreview = oldPreview })
+
+	m := newTeaModel([]model.Session{{Name: "api"}, {Name: "web"}}, Options{Context: context.Background()})
+	m.previewKey = ""
+	m, firstCmd := m.refreshPreview()
+	firstResult := make(chan tea.Msg, 1)
+	go func() { firstResult <- previewResult(firstCmd) }()
+	select {
+	case <-firstStarted:
+	case err := <-previewErr:
+		require.FailNow(t, fmt.Sprint(err))
+	case <-time.After(time.Second):
+		require.FailNow(t, "first preview did not start")
+	}
+
+	m.list.Move(1)
+	m, secondCmd := m.refreshPreview()
+	secondResult := make(chan tea.Msg, 1)
+	go func() { secondResult <- previewResult(secondCmd) }()
+	select {
+	case <-secondStarted:
+	case err := <-previewErr:
+		require.FailNow(t, fmt.Sprint(err))
+	case <-time.After(time.Second):
+		require.FailNow(t, "replacement preview did not start")
+	}
+	select {
+	case <-firstCanceled:
+	case <-time.After(time.Second):
+		require.FailNow(t, "superseded preview did not observe cancellation")
+	}
+
+	close(releaseSecond)
+	updated, _ := m.Update(<-secondResult)
+	m = updated.(teaModel)
+	require.Equal(t, "web preview", m.preview)
+	<-firstResult
+}
+
+func TestTeaModelRejectsObsoleteSameKeyPreview(t *testing.T) {
+	oldPreview := renderPreview
+	renderPreview = func(_ context.Context, s model.Session, _ string) (string, error) {
+		return s.Name + " preview", nil
+	}
+	t.Cleanup(func() { renderPreview = oldPreview })
+
+	m := newTeaModel([]model.Session{{Name: "api"}, {Name: "web"}}, Options{})
+	m.previewKey = ""
+	m, firstCmd := m.refreshPreview()
+	m.list.Move(1)
+	m, _ = m.refreshPreview()
+	m.list.Move(-1)
+	m, _ = m.refreshPreview()
+
+	updated, _ := m.Update(previewResult(firstCmd))
+	m = updated.(teaModel)
+	assert.Empty(t, m.preview)
+}
+
+func TestTeaModelCancelsPreviewOnQuitOrNoPreview(t *testing.T) {
+	for _, tt := range []struct {
+		name    string
+		advance func(teaModel) (teaModel, tea.Cmd)
+	}{
+		{
+			name: "quit",
+			advance: func(m teaModel) (teaModel, tea.Cmd) {
+				updated, cmd := m.Update(tea.KeyPressMsg{Code: tea.KeyEscape})
+				return updated.(teaModel), cmd
+			},
+		},
+		{
+			name: "no preview",
+			advance: func(m teaModel) (teaModel, tea.Cmd) {
+				m = m.filter("missing")
+				return m.refreshPreview()
+			},
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			started := make(chan struct{})
+			canceled := make(chan struct{})
+			oldPreview := renderPreview
+			renderPreview = func(ctx context.Context, _ model.Session, _ string) (string, error) {
+				close(started)
+				<-ctx.Done()
+				close(canceled)
+				return "", ctx.Err()
+			}
+			t.Cleanup(func() { renderPreview = oldPreview })
+
+			m := newTeaModel([]model.Session{{Name: "api"}}, Options{Context: context.Background()})
+			m.previewKey = ""
+			m, previewCmd := m.refreshPreview()
+			go previewResult(previewCmd)
+			select {
+			case <-started:
+			case <-time.After(time.Second):
+				require.FailNow(t, "preview did not start")
+			}
+
+			_, _ = tt.advance(m)
+			select {
+			case <-canceled:
+			case <-time.After(time.Second):
+				require.FailNow(t, "preview did not observe cancellation")
+			}
+		})
+	}
+}
+
+func TestTeaModelCancelsRestartedPreviewWhenQuittingPendingClose(t *testing.T) {
+	t.Setenv("HERDR_SESH_REDUCE_MOTION", "1")
+	closeStarted := make(chan struct{})
+	previewStarted := make(chan struct{})
+	previewCanceled := make(chan struct{})
+	oldPreview := renderPreview
+	renderPreview = func(ctx context.Context, _ model.Session, _ string) (string, error) {
+		close(previewStarted)
+		<-ctx.Done()
+		close(previewCanceled)
+		return "", ctx.Err()
+	}
+	t.Cleanup(func() { renderPreview = oldPreview })
+
+	m := newTeaModel([]model.Session{
+		{Source: "herdr", Name: "api", WorkspaceID: "w1"},
+		{Source: "herdr", Name: "web", WorkspaceID: "w2"},
+	}, Options{
+		Context: context.Background(),
+		CloseWorkspace: func(ctx context.Context, _ string) error {
+			close(closeStarted)
+			<-ctx.Done()
+			return ctx.Err()
+		},
+	})
+	m.listFocused = true
+	updated, closeCmd := m.Update(tea.KeyPressMsg{Code: 'x', Mod: tea.ModCtrl})
+	m = updated.(teaModel)
+	closeResult := make(chan tea.Msg, 1)
+	go func() { closeResult <- closeCmd() }()
+	select {
+	case <-closeStarted:
+	case <-time.After(time.Second):
+		require.FailNow(t, "workspace close did not start")
+	}
+
+	updated, moveCmd := m.Update(tea.KeyPressMsg{Code: tea.KeyDown})
+	m = updated.(teaModel)
+	go executeTeaCommand(moveCmd)
+	select {
+	case <-previewStarted:
+	case <-time.After(time.Second):
+		require.FailNow(t, "navigation did not restart preview during close")
+	}
+
+	updated, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyEscape})
+	m = updated.(teaModel)
+	updated, quitCmd := m.Update(<-closeResult)
+	m = updated.(teaModel)
+	require.NotNil(t, quitCmd)
+	if quitMsg := quitCmd(); quitMsg == nil {
+		require.FailNow(t, "quit command returned nil")
+	} else {
+		_, ok := quitMsg.(tea.QuitMsg)
+		require.True(t, ok)
+	}
+	select {
+	case <-previewCanceled:
+	case <-time.After(time.Second):
+		require.FailNow(t, "restarted preview did not observe cancellation before quit")
 	}
 }
 
@@ -899,21 +1662,117 @@ func TestTeaModelRefreshesAgentStatuses(t *testing.T) {
 
 	updated, cmd := m.Update(statusRefreshTickMsg{})
 	m = updated.(teaModel)
-	if cmd == nil {
-		t.Fatal("status refresh tick did not fetch statuses")
-	}
+	require.NotNil(t, cmd)
 
 	updated, next := m.Update(cmd())
 	m = updated.(teaModel)
 	current, ok := m.list.Current()
-	if !ok || current.AgentStatus != "blocked" {
-		t.Fatalf("current=%#v ok=%v", current, ok)
-	}
-	if m.list.Query != "api" || len(m.list.Filtered) != 1 {
-		t.Fatalf("query=%q filtered=%#v", m.list.Query, m.list.Filtered)
-	}
-	if next == nil {
-		t.Fatal("status refresh did not schedule the next tick")
+	require.True(t, ok)
+	require.Equal(t, "blocked", current.AgentStatus)
+	require.Equal(t, "api", m.list.Query)
+	require.Len(t, m.list.Filtered, 1)
+	require.NotNil(t, next)
+}
+
+func TestTeaModelAgentSortRefreshPreservesSelectionAndPreview(t *testing.T) {
+	m := newTeaModel([]model.Session{
+		{Source: "herdr", Name: "api-one", WorkspaceID: "w1", AgentStatus: "working"},
+		{Source: "herdr", Name: "api-two", WorkspaceID: "w2", AgentStatus: "idle"},
+		{Source: "herdr", Name: "api-three", WorkspaceID: "w3", AgentStatus: "blocked"},
+	}, Options{WorkspaceSort: "agent"})
+	m.list.Filter("api")
+	m.list.Selected = 1
+	selected, ok := m.list.Current()
+	require.True(t, ok)
+	require.Equal(t, "w1", selected.WorkspaceID)
+	selectedKey := model.Key(selected)
+	m.previewKey = selectedKey
+	previewRequestID := m.previewRequestID
+	m.smearActive = true
+	m.focusSmearActive = true
+
+	updated, next := m.Update(agentStatusesMsg{statuses: map[string]string{
+		"w1": "idle",
+		"w2": "blocked",
+		"w3": "done",
+	}})
+	m = updated.(teaModel)
+
+	require.Equal(t, []string{"api-two", "api-three", "api-one"}, sessionNames(m.list.All))
+	require.Equal(t, []string{"api-two", "api-three", "api-one"}, sessionNames(m.list.Filtered))
+	current, ok := m.list.Current()
+	require.True(t, ok)
+	require.Equal(t, selectedKey, model.Key(current))
+	require.Equal(t, "api", m.list.Query)
+	require.Equal(t, selectedKey, m.previewKey)
+	require.Equal(t, previewRequestID, m.previewRequestID)
+	require.False(t, m.smearActive)
+	require.False(t, m.focusSmearActive)
+	require.NotNil(t, next)
+}
+
+func TestTeaModelAgentSortRefreshDemotesMissingStatus(t *testing.T) {
+	m := newTeaModel([]model.Session{
+		{Source: "herdr", Name: "blocked", WorkspaceID: "w1", AgentStatus: "blocked"},
+		{Source: "herdr", Name: "idle", WorkspaceID: "w2", AgentStatus: "idle"},
+	}, Options{WorkspaceSort: "agent"})
+
+	updated, _ := m.Update(agentStatusesMsg{statuses: map[string]string{"w2": "idle"}})
+	m = updated.(teaModel)
+
+	require.Equal(t, []string{"idle", "blocked"}, sessionNames(m.list.All))
+	assert.Empty(t, m.list.All[1].AgentStatus)
+}
+
+func TestTeaModelAgentSortRefreshErrorKeepsState(t *testing.T) {
+	m := newTeaModel([]model.Session{
+		{Source: "herdr", Name: "blocked", WorkspaceID: "w1", AgentStatus: "blocked"},
+		{Source: "herdr", Name: "idle", WorkspaceID: "w2", AgentStatus: "idle"},
+	}, Options{WorkspaceSort: "agent"})
+	m.list.Selected = 1
+	selected, _ := m.list.Current()
+	selectedKey := model.Key(selected)
+	m.previewKey = selectedKey
+	previewRequestID := m.previewRequestID
+
+	updated, next := m.Update(agentStatusesMsg{statuses: map[string]string{"w1": "idle", "w2": "blocked"}, err: errors.New("offline")})
+	m = updated.(teaModel)
+
+	require.Equal(t, []string{"blocked", "idle"}, sessionNames(m.list.All))
+	require.Equal(t, "blocked", m.list.All[0].AgentStatus)
+	require.Equal(t, "idle", m.list.All[1].AgentStatus)
+	current, ok := m.list.Current()
+	require.True(t, ok)
+	require.Equal(t, selectedKey, model.Key(current))
+	require.Equal(t, selectedKey, m.previewKey)
+	require.Equal(t, previewRequestID, m.previewRequestID)
+	require.NotNil(t, next)
+}
+
+func TestTeaModelAgentStatusRefreshKeepsNonAgentSortOrder(t *testing.T) {
+	for _, tc := range []struct {
+		mode string
+		want []string
+	}{
+		{mode: "workspace", want: []string{"first", "second"}},
+		{mode: "recent", want: []string{"second", "first"}},
+	} {
+		t.Run(tc.mode, func(t *testing.T) {
+			m := newTeaModel([]model.Session{
+				{Source: "herdr", Name: "first", WorkspaceID: "w1", AgentStatus: "working"},
+				{Source: "herdr", Name: "second", WorkspaceID: "w2", AgentStatus: "idle"},
+			}, Options{WorkspaceSort: tc.mode, RecentWorkspaceIDs: []string{"w2", "w1"}})
+
+			updated, _ := m.Update(agentStatusesMsg{statuses: map[string]string{"w1": "idle", "w2": "blocked"}})
+			m = updated.(teaModel)
+
+			require.Equal(t, tc.want, sessionNames(m.list.All))
+			statuses := map[string]string{}
+			for _, item := range m.list.All {
+				statuses[item.WorkspaceID] = item.AgentStatus
+			}
+			assert.Equal(t, map[string]string{"w1": "idle", "w2": "blocked"}, statuses)
+		})
 	}
 }
 
@@ -923,18 +1782,10 @@ func TestPreviewViewUsesConstantHeight(t *testing.T) {
 	short := m.previewView(40, 4)
 	m.preview = strings.Repeat("wrapped preview content ", 20)
 	long := m.previewView(40, 4)
-	if lipgloss.Height(short) != lipgloss.Height(long) {
-		t.Fatalf("preview heights changed: short=%d long=%d\nshort:\n%s\nlong:\n%s", lipgloss.Height(short), lipgloss.Height(long), short, long)
-	}
-	if got, want := lipgloss.Height(short), 4+previewTitleRows; got != want {
-		t.Fatalf("preview height=%d, want %d\n%s", got, want, short)
-	}
-	if !strings.Contains(long, "...") {
-		t.Fatalf("long preview missing truncation marker:\n%s", long)
-	}
-	if strings.Contains(ansi.Strip(long), "+-") {
-		t.Fatalf("preview still contains box chrome:\n%s", long)
-	}
+	require.Equal(t, lipgloss.Height(long), lipgloss.Height(short))
+	require.Equal(t, 4+previewTitleRows, lipgloss.Height(short))
+	require.Contains(t, long, "...")
+	assert.NotContains(t, ansi.Strip(long), "+-")
 }
 
 func TestTeaModelUsesAvailableWindowHeight(t *testing.T) {
@@ -945,53 +1796,38 @@ func TestTeaModelUsesAvailableWindowHeight(t *testing.T) {
 	m := newTeaModel(items, Options{})
 	updated, _ := m.Update(tea.WindowSizeMsg{Width: 120, Height: 40})
 	m = updated.(teaModel)
-	if got := m.previewBodyLines(); got <= defaultVisibleRows {
-		t.Fatalf("preview body lines=%d, want more than fallback %d", got, defaultVisibleRows)
-	}
+	require.Greater(t, m.previewBodyLines(), defaultVisibleRows)
 	view := ansi.Strip(m.View().Content)
-	if got, want := lipgloss.Height(view), 40; got != want {
-		t.Fatalf("view height=%d, want %d", got, want)
-	}
+	require.Equal(t, 40, lipgloss.Height(view))
 	lines := strings.Split(view, "\n")
-	if lines[0] != "" {
-		t.Fatalf("expected top padding row, got %q\n%s", lines[0], view)
-	}
-	if header := lines[1]; !strings.Contains(header, "herdr / sesh") {
-		t.Fatalf("expected navigator header after padding, got %q\n%s", header, view)
-	}
-	if got, want := maxLineWidth(view), 120; got != want {
-		t.Fatalf("view width=%d, want %d:\n%s", got, want, view)
-	}
-	if last := lines[len(lines)-1]; strings.TrimSpace(last) != "" {
-		t.Fatalf("expected bottom breathing room, got %q\n%s", last, view)
-	}
+	require.Empty(t, lines[0])
+	require.Contains(t, lines[1], "herdr / sesh")
+	require.Equal(t, 120, maxLineWidth(view))
+	assert.Empty(t, strings.TrimSpace(lines[len(lines)-1]))
 }
 
 func TestSelectedRowUsesRailAndPreservesSourceColor(t *testing.T) {
 	got := row(model.Session{Source: "herdr", Name: "herdr-plugin-sesh", Path: "/tmp/herdr-plugin-sesh", AgentStatus: "working"}, true, 80, true, "")
 	plain := ansi.Strip(got)
-	if !strings.Contains(plain, "┃") {
-		t.Fatalf("selected row missing navigation rail:\n%q", got)
-	}
+	require.Contains(t, plain, "┃")
 	for _, want := range []string{"38;2;125;207;255", "38;2;224;175;104", herdrSourceIcon + " herdr", "herdr-plugin-sesh", "/tmp/herdr-plugin-sesh"} {
-		if !strings.Contains(got, want) {
-			t.Fatalf("selected row missing %q:\n%q", want, got)
-		}
+		require.Contains(t, got, want)
 	}
-	if strings.Contains(got, "48;2;") || strings.Contains(got, "48;5;") {
-		t.Fatalf("selected row should not use a background fill:\n%q", got)
-	}
+	require.NotContains(t, got, "48;2;")
+	assert.NotContains(t, got, "48;5;")
 }
 
 func TestListViewHighlightsCaseInsensitiveQueryMatches(t *testing.T) {
-	m := newTeaModel([]model.Session{{Name: "workspace-API", Path: "/tmp/workspace-API"}}, Options{})
+	m := newTeaModel([]model.Session{{
+		Name:     "workspace-API",
+		Path:     "/tmp/workspace-API",
+		Worktree: model.WorktreeRelation{Linked: true, ParentWorkspaceName: "root"},
+	}}, Options{})
 	m.list.Filter("api")
 
 	got := m.listView(80, 1)
 	want := lipgloss.NewStyle().Foreground(violetColor).Bold(true).Render("API")
-	if matches := strings.Count(got, want); matches != 2 {
-		t.Fatalf("highlighted matches=%d, want 2:\n%q", matches, got)
-	}
+	assert.Equal(t, 2, strings.Count(got, want))
 }
 
 func TestListViewPreservesUnicodeWhenHighlightingFoldedMatch(t *testing.T) {
@@ -1000,12 +1836,8 @@ func TestListViewPreservesUnicodeWhenHighlightingFoldedMatch(t *testing.T) {
 
 	got := m.listView(80, 1)
 	want := matchStyle.Render("Ⱥ")
-	if !utf8.ValidString(got) {
-		t.Fatalf("highlighted row is invalid UTF-8: %q", got)
-	}
-	if matches := strings.Count(got, want); matches != 2 {
-		t.Fatalf("highlighted matches=%d, want 2:\n%q", matches, got)
-	}
+	require.True(t, utf8.ValidString(got))
+	assert.Equal(t, 2, strings.Count(got, want))
 }
 
 func TestTeaModelStacksPreviewAtNarrowWidth(t *testing.T) {
@@ -1014,72 +1846,270 @@ func TestTeaModelStacksPreviewAtNarrowWidth(t *testing.T) {
 	updated, _ := m.Update(tea.WindowSizeMsg{Width: 70, Height: 28})
 	m = updated.(teaModel)
 	view := ansi.Strip(m.View().Content)
-	if got, want := lipgloss.Height(view), 28; got != want {
-		t.Fatalf("view height=%d, want %d:\n%s", got, want, view)
+	require.Equal(t, 28, lipgloss.Height(view))
+	require.Contains(t, view, "WORKSPACES")
+	require.Contains(t, view, "PREVIEW [ctrl+o] · api · blocked")
+	assert.NotContains(t, view, "│")
+}
+
+func TestTeaModelHidePreviewUsesAllAvailableSpace(t *testing.T) {
+	items := make([]model.Session, 18)
+	for i := range items {
+		items[i] = model.Session{
+			Name: fmt.Sprintf("workspace-%02d", i),
+			Path: "/tmp/path-that-only-fits-after-preview-space-is-reclaimed",
+		}
 	}
-	if !strings.Contains(view, "WORKSPACES") || !strings.Contains(view, "PREVIEW · api · blocked") {
-		t.Fatalf("narrow view missing stacked sections:\n%s", view)
+
+	for _, width := range []int{70, 120} {
+		t.Run(fmt.Sprintf("width_%d", width), func(t *testing.T) {
+			m := newTeaModel(items, Options{HidePreview: true})
+			updated, _ := m.Update(tea.WindowSizeMsg{Width: width, Height: 28})
+			m = updated.(teaModel)
+			view := ansi.Strip(m.View().Content)
+
+			require.NotContains(t, view, "PREVIEW")
+			require.NotContains(t, view, "│")
+			require.Equal(t, 28, lipgloss.Height(view))
+			require.Equal(t, width, maxLineWidth(view))
+			if width == 70 {
+				assert.Contains(t, view, "workspace-17")
+			}
+			if width == 120 {
+				assert.Contains(t, view, items[0].Path)
+			}
+		})
 	}
-	if strings.Contains(view, "│") {
-		t.Fatalf("narrow view should not contain a vertical pane divider:\n%s", view)
-	}
+}
+
+func TestTeaModelHidePreviewFitsShortNarrowTerminal(t *testing.T) {
+	m := newTeaModel([]model.Session{{Name: "api", Path: "/tmp/api"}}, Options{HidePreview: true})
+	updated, _ := m.Update(tea.WindowSizeMsg{Width: 70, Height: 14})
+	m = updated.(teaModel)
+	view := ansi.Strip(m.View().Content)
+
+	assert.Equal(t, 14, lipgloss.Height(view))
+}
+
+func TestTeaModelHidePreviewShowsWorkspaceCloseProgressInFooter(t *testing.T) {
+	m := newTeaModel([]model.Session{{Source: "herdr", Name: "api", WorkspaceID: "w1"}}, Options{
+		HidePreview:    true,
+		CloseWorkspace: func(context.Context, string) error { return nil },
+	})
+	updated, _ := m.Update(tea.WindowSizeMsg{Width: 120, Height: 28})
+	m = updated.(teaModel)
+	m, _ = m.closeSelectedWorkspace()
+	t.Cleanup(func() {
+		if m.cancelWorkspaceClose != nil {
+			m.cancelWorkspaceClose()
+		}
+	})
+
+	require.Contains(t, renderedFooter(m), "Closing workspace...")
+	updated, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyEscape})
+	m = updated.(teaModel)
+	assert.Contains(t, renderedFooter(m), "Cancelling workspace close...")
+}
+
+func renderedFooter(m teaModel) string {
+	lines := strings.Split(strings.TrimSuffix(ansi.Strip(m.View().Content), "\n"), "\n")
+	return lines[len(lines)-1]
 }
 
 func TestTeaModelSplitsPreviewAtTerminalThreshold(t *testing.T) {
 	m := newTeaModel([]model.Session{{Name: "api"}}, Options{})
 	updated, _ := m.Update(tea.WindowSizeMsg{Width: previewSplitWidth, Height: 28})
 	m = updated.(teaModel)
-	if view := ansi.Strip(m.View().Content); !strings.Contains(view, "│") {
-		t.Fatalf("preview should split at width %d:\n%s", previewSplitWidth, view)
-	}
+	assert.Contains(t, ansi.Strip(m.View().Content), "│")
 }
 
 func TestTeaModelHeaderShowsFilteredCountWhenAllRowsMatch(t *testing.T) {
 	m := newTeaModel([]model.Session{{Name: "workspace-api"}, {Name: "workspace-web"}}, Options{})
 	m.list.Filter("workspace")
-	if got := ansi.Strip(m.header(80)); !strings.Contains(got, "2/2 workspaces") {
-		t.Fatalf("filtered header=%q, want total-aware count", got)
-	}
+	assert.Contains(t, ansi.Strip(m.header(80)), "2/2 workspaces")
 }
 
 func TestTeaModelCyclesHerdrWorkspaceSortModes(t *testing.T) {
 	items := []model.Session{
 		{Source: "config", Name: "configured"},
-		{Source: "herdr", Name: "first", WorkspaceID: "w1"},
+		{Source: "herdr", Name: "first", WorkspaceID: "w1", AgentStatus: "working"},
 		{Source: "zoxide", Name: "recent-directory"},
-		{Source: "herdr", Name: "second", WorkspaceID: "w2"},
-		{Source: "herdr", Name: "third", WorkspaceID: "w3"},
+		{Source: "herdr", Name: "second", WorkspaceID: "w2", AgentStatus: "blocked"},
+		{Source: "herdr", Name: "third", WorkspaceID: "w3", AgentStatus: "idle"},
 	}
 	m := newTeaModel(items, Options{RecentWorkspaceIDs: []string{"w3", "w1"}})
+	require.Equal(t, []string{"configured", "first", "recent-directory", "second", "third"}, sessionNames(m.list.All))
 
 	updated, _ := m.Update(tea.KeyPressMsg{Code: 'r', Mod: tea.ModCtrl})
 	m = updated.(teaModel)
-	if got, want := sessionNames(m.list.All), []string{"configured", "third", "recent-directory", "first", "second"}; !reflect.DeepEqual(got, want) {
-		t.Fatalf("recent order=%v want %v", got, want)
-	}
-	if view := ansi.Strip(m.View().Content); !strings.Contains(view, "ctrl+r recent") {
-		t.Fatalf("view missing recent sort mode:\n%s", view)
-	}
+	require.Equal(t, []string{"configured", "third", "recent-directory", "first", "second"}, sessionNames(m.list.All))
+	require.Contains(t, ansi.Strip(m.View().Content), "ctrl+r recent")
 
 	updated, _ = m.Update(tea.KeyPressMsg{Code: 'r', Mod: tea.ModCtrl})
 	m = updated.(teaModel)
-	if got, want := sessionNames(m.list.All), []string{"configured", "first", "recent-directory", "second", "third"}; !reflect.DeepEqual(got, want) {
-		t.Fatalf("workspace order=%v want %v", got, want)
-	}
+	require.Equal(t, []string{"configured", "second", "recent-directory", "first", "third"}, sessionNames(m.list.All))
+	require.Contains(t, ansi.Strip(m.View().Content), "ctrl+r agent")
+
+	updated, _ = m.Update(tea.KeyPressMsg{Code: 'r', Mod: tea.ModCtrl})
+	m = updated.(teaModel)
+	require.Equal(t, []string{"configured", "first", "recent-directory", "second", "third"}, sessionNames(m.list.All))
+	assert.Contains(t, ansi.Strip(m.View().Content), "ctrl+r workspace")
 }
 
 func TestTeaModelStartsWithConfiguredWorkspaceSort(t *testing.T) {
-	m := newTeaModel([]model.Session{
-		{Source: "herdr", Name: "first", WorkspaceID: "w1"},
+	items := []model.Session{
+		{Source: "herdr", Name: "first", WorkspaceID: "w1", AgentStatus: "idle"},
 		{Source: "herdr", Name: "second", WorkspaceID: "w2"},
-	}, Options{RecentWorkspaceIDs: []string{"w2", "w1"}, RecentWorkspaceSort: true})
+		{Source: "herdr", Name: "third", WorkspaceID: "w3", AgentStatus: "blocked"},
+	}
+	tests := []struct {
+		name string
+		mode string
+		want []string
+	}{
+		{name: "default", want: []string{"first", "second", "third"}},
+		{name: "workspace", mode: "workspace", want: []string{"first", "second", "third"}},
+		{name: "recent", mode: "recent", want: []string{"second", "first", "third"}},
+		{name: "agent", mode: "agent", want: []string{"third", "first", "second"}},
+		{name: "unknown falls back", mode: "future", want: []string{"first", "second", "third"}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			m := newTeaModel(items, Options{RecentWorkspaceIDs: []string{"w2", "w1", "w3"}, WorkspaceSort: tc.mode})
+			require.Equal(t, tc.want, sessionNames(m.list.All))
+			wantMode := tc.mode
+			if wantMode == "" || wantMode == "future" {
+				wantMode = "workspace"
+			}
+			assert.Contains(t, ansi.Strip(m.View().Content), "ctrl+r "+wantMode)
+		})
+	}
+}
 
-	if got, want := sessionNames(m.list.All), []string{"second", "first"}; !reflect.DeepEqual(got, want) {
-		t.Fatalf("initial order=%v want %v", got, want)
+func TestTeaModelAgentSortRanksStatusesAndPreservesSourceSlots(t *testing.T) {
+	items := []model.Session{
+		{Source: "config", Name: "configured"},
+		{Source: "herdr", Name: "unknown", WorkspaceID: "w-unknown", AgentStatus: "unknown"},
+		{Source: "zoxide", Name: "directory"},
+		{Source: "herdr", Name: "working-a", WorkspaceID: "w-working-a", AgentStatus: "working"},
+		{Source: "herdr", Name: "agentless", WorkspaceID: "w-agentless"},
+		{Source: "herdr", Name: "blocked", WorkspaceID: "w-blocked", AgentStatus: "blocked"},
+		{Source: "herdr", Name: "done", WorkspaceID: "w-done", AgentStatus: "done"},
+		{Source: "herdr", Name: "working-b", WorkspaceID: "w-working-b", AgentStatus: "working"},
+		{Source: "herdr", Name: "idle", WorkspaceID: "w-idle", AgentStatus: "idle"},
+		{Source: "herdr", Name: "future", WorkspaceID: "w-future", AgentStatus: "waiting"},
 	}
-	if view := ansi.Strip(m.View().Content); !strings.Contains(view, "ctrl+r recent") {
-		t.Fatalf("view missing recent sort mode:\n%s", view)
+
+	m := newTeaModel(items, Options{WorkspaceSort: "agent"})
+
+	want := []string{"configured", "blocked", "directory", "done", "working-a", "working-b", "idle", "unknown", "agentless", "future"}
+	assert.Equal(t, want, sessionNames(m.list.All))
+}
+
+func TestTeaModelAgentSortPromotesWorktreeFamilyByBestMember(t *testing.T) {
+	items := []model.Session{
+		{Source: "herdr", Name: "unresolved", WorkspaceID: "w-unresolved", AgentStatus: "working", Worktree: model.WorktreeRelation{Linked: true, ParentWorkspaceID: "w-missing"}},
+		{Source: "herdr", Name: "child-idle", WorkspaceID: "w-child-idle", AgentStatus: "idle", Worktree: model.WorktreeRelation{Linked: true, ParentWorkspaceID: "w-parent"}},
+		{Source: "herdr", Name: "other", WorkspaceID: "w-other", AgentStatus: "done"},
+		{Source: "herdr", Name: "parent", WorkspaceID: "w-parent"},
+		{Source: "herdr", Name: "child-blocked", WorkspaceID: "w-child-blocked", AgentStatus: "blocked", Worktree: model.WorktreeRelation{Linked: true, ParentWorkspaceID: "w-parent"}},
 	}
+
+	m := newTeaModel(items, Options{WorkspaceSort: "agent"})
+
+	want := []string{"parent", "child-blocked", "child-idle", "other", "unresolved"}
+	assert.Equal(t, want, sessionNames(m.list.All))
+}
+
+func TestSortHerdrWorkspacesGroupsChildrenBelowParent(t *testing.T) {
+	items := []model.Session{
+		{Source: "config", Name: "configured"},
+		{Source: "herdr", Name: "child-b", WorkspaceID: "w-child-b", Worktree: model.WorktreeRelation{Linked: true, ParentWorkspaceID: "w-parent", ParentWorkspaceName: "parent"}},
+		{Source: "zoxide", Name: "directory"},
+		{Source: "herdr", Name: "unrelated", WorkspaceID: "w-unrelated"},
+		{Source: "herdr", Name: "parent", WorkspaceID: "w-parent"},
+		{Source: "herdr", Name: "child-a", WorkspaceID: "w-child-a", Worktree: model.WorktreeRelation{Linked: true, ParentWorkspaceID: "w-parent", ParentWorkspaceName: "parent"}},
+	}
+
+	sortHerdrWorkspaces(items, []string{"w-child-b", "w-unrelated", "w-parent", "w-child-a"})
+
+	assert.Equal(t, []string{"configured", "parent", "directory", "child-b", "child-a", "unrelated"}, sessionNames(items))
+}
+
+func TestSortHerdrWorkspacesRanksFamilyByMostRecentMember(t *testing.T) {
+	items := []model.Session{
+		{Source: "herdr", Name: "parent", WorkspaceID: "w-parent"},
+		{Source: "herdr", Name: "child-a", WorkspaceID: "w-child-a", Worktree: model.WorktreeRelation{Linked: true, ParentWorkspaceID: "w-parent"}},
+		{Source: "herdr", Name: "child-b", WorkspaceID: "w-child-b", Worktree: model.WorktreeRelation{Linked: true, ParentWorkspaceID: "w-parent"}},
+		{Source: "herdr", Name: "unrelated", WorkspaceID: "w-unrelated"},
+	}
+
+	sortHerdrWorkspaces(items, []string{"w-child-b", "w-unrelated", "w-parent"})
+
+	assert.Equal(t, []string{"parent", "child-b", "child-a", "unrelated"}, sessionNames(items))
+}
+
+func TestSortHerdrWorkspacesLeavesUnresolvedChildIndependent(t *testing.T) {
+	items := []model.Session{
+		{Source: "herdr", Name: "unresolved", WorkspaceID: "w-child", Worktree: model.WorktreeRelation{Linked: true, ParentWorkspaceID: "w-missing"}},
+		{Source: "herdr", Name: "other", WorkspaceID: "w-other"},
+	}
+
+	sortHerdrWorkspaces(items, []string{"w-other", "w-child"})
+
+	assert.Equal(t, []string{"other", "unresolved"}, sessionNames(items))
+}
+
+func TestTeaModelGroupsWorktreeFamilyWithoutMutatingInput(t *testing.T) {
+	items := []model.Session{
+		{Source: "herdr", Name: "child", WorkspaceID: "w-child", Worktree: model.WorktreeRelation{Linked: true, ParentWorkspaceID: "w-parent"}},
+		{Source: "herdr", Name: "parent", WorkspaceID: "w-parent"},
+	}
+
+	m := newTeaModel(items, Options{})
+
+	require.Equal(t, []string{"parent", "child"}, sessionNames(m.list.All))
+	assert.Equal(t, []string{"child", "parent"}, sessionNames(items))
+}
+
+func TestTeaModelKeepsWorktreeFamilyAcrossSortModes(t *testing.T) {
+	items := []model.Session{
+		{Source: "herdr", Name: "child", WorkspaceID: "w-child", AgentStatus: "blocked", Worktree: model.WorktreeRelation{Linked: true, ParentWorkspaceID: "w-parent"}},
+		{Source: "herdr", Name: "parent", WorkspaceID: "w-parent"},
+		{Source: "herdr", Name: "other", WorkspaceID: "w-other", AgentStatus: "done"},
+	}
+	m := newTeaModel(items, Options{RecentWorkspaceIDs: []string{"w-other", "w-child"}})
+	require.Equal(t, []string{"parent", "child", "other"}, sessionNames(m.list.All))
+
+	updated, _ := m.Update(tea.KeyPressMsg{Code: 'r', Mod: tea.ModCtrl})
+	m = updated.(teaModel)
+	require.Equal(t, []string{"other", "parent", "child"}, sessionNames(m.list.All))
+
+	updated, _ = m.Update(tea.KeyPressMsg{Code: 'r', Mod: tea.ModCtrl})
+	m = updated.(teaModel)
+	require.Equal(t, []string{"parent", "child", "other"}, sessionNames(m.list.All))
+
+	updated, _ = m.Update(tea.KeyPressMsg{Code: 'r', Mod: tea.ModCtrl})
+	m = updated.(teaModel)
+	assert.Equal(t, []string{"parent", "child", "other"}, sessionNames(m.list.All))
+}
+
+func TestTeaModelFilterDoesNotInjectWorktreeParent(t *testing.T) {
+	m := newTeaModel([]model.Session{
+		{Source: "herdr", Name: "parent", WorkspaceID: "w-parent"},
+		{Source: "herdr", Name: "feature", Path: "/tmp/feature", WorkspaceID: "w-child", Worktree: model.WorktreeRelation{Linked: true, ParentWorkspaceID: "w-parent", ParentWorkspaceName: "parent"}},
+	}, Options{})
+
+	m.list.Filter("feature")
+
+	require.Equal(t, []string{"feature"}, sessionNames(m.list.Filtered))
+	rowText := ansi.Strip(m.listView(80, 1))
+	require.Contains(t, rowText, "[↳ herdr]")
+	require.Contains(t, rowText, "feature")
+	require.Contains(t, rowText, "/tmp/feature")
+	require.NotContains(t, rowText, "worktree of parent")
+	require.NotContains(t, rowText, "├─")
+	assert.NotContains(t, rowText, "└─")
 }
 
 func TestTeaModelSearchRailDoesNotTruncateAtWindowEdge(t *testing.T) {
@@ -1087,8 +2117,8 @@ func TestTeaModelSearchRailDoesNotTruncateAtWindowEdge(t *testing.T) {
 	updated, _ := m.Update(tea.WindowSizeMsg{Width: 80, Height: 28})
 	m = updated.(teaModel)
 	for _, line := range strings.Split(ansi.Strip(m.View().Content), "\n") {
-		if strings.Contains(line, defaultPrompt) && strings.Contains(line, "…") {
-			t.Fatalf("search rail was truncated at the window edge: %q", line)
+		if strings.Contains(line, defaultPrompt) {
+			assert.NotContains(t, line, "…")
 		}
 	}
 }
@@ -1101,18 +2131,16 @@ func TestListViewUsesDirectionalOverflowMarkers(t *testing.T) {
 	m := newTeaModel(items, Options{})
 	m.list.Selected = 10
 	view := ansi.Strip(m.listView(60, 6))
-	if !strings.Contains(view, "↑ 7 more") || !strings.Contains(view, "↓ 9 more") || strings.Contains(view, "...") {
-		t.Fatalf("list view missing directional overflow markers:\n%s", view)
-	}
+	require.Contains(t, view, "↑ 7 more")
+	require.Contains(t, view, "↓ 9 more")
+	assert.NotContains(t, view, "...")
 }
 
 func TestListViewKeepsSelectionVisibleWithTwoRows(t *testing.T) {
 	items := []model.Session{{Name: "workspace-0"}, {Name: "workspace-1"}, {Name: "workspace-2"}, {Name: "workspace-3"}, {Name: "workspace-4"}}
 	m := newTeaModel(items, Options{})
 	m.list.Selected = 2
-	if view := ansi.Strip(m.listView(60, 2)); !strings.Contains(view, "workspace-2") {
-		t.Fatalf("two-row list hid the selected workspace:\n%s", view)
-	}
+	assert.Contains(t, ansi.Strip(m.listView(60, 2)), "workspace-2")
 }
 
 func maxLineWidth(s string) int {
@@ -1137,4 +2165,56 @@ func sessionNames(items []model.Session) []string {
 		names[i] = items[i].Name
 	}
 	return names
+}
+
+func TestTeaModelHidePath(t *testing.T) {
+	items := []model.Session{{Name: "workspace", Path: "/unique/path", Source: "config"}}
+	for _, hide := range []bool{false, true} {
+		m := newTeaModel(items, Options{HidePath: hide})
+		m.width = 204
+		listWidth, previewWidth := m.previewLayout()
+		if hide {
+			assert.Equal(t, 100, previewWidth)
+			assert.NotContains(t, ansi.Strip(m.listView(listWidth, 1)), "/unique/path")
+		} else {
+			assert.Equal(t, maxPreviewWidth, previewWidth)
+			assert.Contains(t, ansi.Strip(m.listView(listWidth, 1)), "/unique/path")
+		}
+		assert.Contains(t, ansi.Strip(m.listView(listWidth, 1)), "workspace")
+		assert.Equal(t, m.contentWidth(), listWidth+3+previewWidth)
+		m.previewWidth = 70
+		_, previewWidth = m.previewLayout()
+		assert.Equal(t, 70, previewWidth, "manual resizing takes precedence")
+		m.width = 80
+		_, previewWidth = m.previewLayout()
+		assert.Zero(t, previewWidth, "narrow terminals keep stacked previews")
+		m.width = 204
+		m.hidePreview = true
+		_, previewWidth = m.previewLayout()
+		assert.Zero(t, previewWidth)
+		if hide {
+			assert.NotContains(t, ansi.Strip(m.listView(m.contentWidth(), 1)), "/unique/path")
+		}
+	}
+}
+
+// The merged footer carries upstream's sort label and the fork's clear hint. It
+// must shrink rather than drop either one, and must not squeeze the full
+// LAST WORKSPACE label into its compact form to make room.
+func TestFooterHelpTextKeepsClearHintAndSortModeWhileShrinking(t *testing.T) {
+	m := newTeaModel(nil, Options{
+		LastWorkspaceID: "ws-api",
+		HerdrWorkspaces: []model.Session{{Source: "herdr", Name: "api", Path: "/home/test/api", WorkspaceID: "ws-api"}},
+	})
+	for _, width := range []int{40, 60, 80, 100, 140} {
+		help := m.footerHelpText(width)
+		assert.Containsf(t, help, "ctrl+u", "width %d dropped the clear hint: %q", width, help)
+		assert.Containsf(t, help, "ctrl+r "+m.workspaceSort, "width %d dropped the sort mode: %q", width, help)
+	}
+
+	updated, _ := m.Update(tea.WindowSizeMsg{Width: 120, Height: 28})
+	m = updated.(teaModel)
+	view := ansi.Strip(m.View().Content)
+	require.Contains(t, view, "LAST WORKSPACE")
+	assert.Contains(t, view, "ctrl+u clear")
 }

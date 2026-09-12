@@ -6,6 +6,7 @@ repo_root=$(git rev-parse --show-toplevel)
 workflow="$repo_root/.github/workflows/release.yml"
 changelog_workflow="$repo_root/.github/workflows/changelog.yml"
 helper="$repo_root/.github/scripts/checkout-release-ref.sh"
+justfile="$repo_root/justfile"
 
 # shellcheck disable=SC2016 # Match the workflow's literal shell variables.
 if ! grep -Fq 'bash .github/scripts/checkout-release-ref.sh "$RELEASE_REF"' "$workflow"; then
@@ -53,6 +54,10 @@ fi
 # shellcheck disable=SC2016 # Match the workflow's literal shell variables.
 if ! grep -Fq 'if [ "$manifest_version" != "$version" ]; then' "$changelog_workflow"; then
   echo 'changelog workflow must reject tags that do not match the manifest version' >&2
+  exit 1
+fi
+if ! grep -Fq '  pull-requests: read' "$changelog_workflow"; then
+  echo 'changelog workflow must allow git-cliff to read pull request metadata' >&2
   exit 1
 fi
 
@@ -137,3 +142,202 @@ for unsafe_tag in 'v#probe' 'v%2Fprobe' 'v/path' 'v?probe'; do
     *) echo "unsafe release tag $unsafe_tag failed unclearly: $unsafe" >&2; exit 1 ;;
   esac
 done
+
+just_bin=$(mise which just)
+git_cliff_bin=$(mise which git-cliff)
+
+"$git_cliff_bin" --from-context "$repo_root/.github/scripts/testdata/changelog-context.json" \
+  --output "$tmp/rendered-changelog.md"
+if grep -Eq '.## v[0-9]' "$tmp/rendered-changelog.md"; then
+  echo 'first-time contributor entries must preserve the next release heading newline' >&2
+  exit 1
+fi
+if ! grep -Fxq '* @direct-contributor made their first contribution' "$tmp/rendered-changelog.md"; then
+  echo 'first-time contributor entries without a pull request must omit the PR suffix' >&2
+  exit 1
+fi
+if ! grep -Fq 'by @orhun in [#389](https://github.com/fullerzz/herdr-plugin-sesh/pull/389)' \
+  "$tmp/rendered-changelog.md"; then
+  echo 'commit pull request metadata must link to the pull request' >&2
+  exit 1
+fi
+if ! grep -Fq '@first-timer made their first contribution in [#79](https://github.com/fullerzz/herdr-plugin-sesh/pull/79)' \
+  "$tmp/rendered-changelog.md"; then
+  echo 'first-time contributor metadata must link to the pull request' >&2
+  exit 1
+fi
+
+release_tools="$tmp/release-tools"
+mkdir -p "$release_tools"
+printf '%s\n' '#!/usr/bin/env bash' 'exit 0' >"$release_tools/just"
+# shellcheck disable=SC2016 # Write literal shell variables into the fake mise script.
+printf '%s\n' \
+  '#!/usr/bin/env bash' \
+  'set -euo pipefail' \
+  'if [ "$1" != exec ] || [ "$2" != -- ] || [ "$3" != git-cliff ]; then' \
+  '  echo "unexpected mise invocation: $*" >&2' \
+  '  exit 1' \
+  'fi' \
+  'shift 3' \
+  'exec "$RELEASE_TEST_GIT_CLIFF" "$@"' \
+  >"$release_tools/mise"
+chmod +x "$release_tools/just" "$release_tools/mise"
+
+if preview_error=$(
+  cd "$repo_root"
+  env -u GITHUB_TOKEN \
+    GIT_CLIFF_OFFLINE=true \
+    PATH="$release_tools:$PATH" \
+    RELEASE_TEST_GIT_CLIFF="$git_cliff_bin" \
+    "$just_bin" preview-changelog 2>&1
+); then
+  echo 'changelog preview must require an authenticated GitHub metadata request' >&2
+  exit 1
+fi
+case "$preview_error" in
+  *'GITHUB_TOKEN is required for GitHub changelog metadata'*) ;;
+  *) echo "missing changelog preview token failed unclearly: $preview_error" >&2; exit 1 ;;
+esac
+
+setup_release_repo() {
+  release_repo=$1
+  release_remote=$2
+  git init -q -b main "$release_repo"
+  git init -q --bare "$release_remote"
+  git -C "$release_repo" config user.email test@example.com
+  git -C "$release_repo" config user.name 'Release recipe test'
+  git -C "$release_repo" config commit.gpgsign false
+  cp "$justfile" "$repo_root/cliff.toml" "$release_repo/"
+  mkdir -p "$release_repo/bin"
+  printf 'version = "1.2.3"\n' >"$release_repo/herdr-plugin.toml"
+  printf '## v1.2.2 (2026-08-20)\n' >"$release_repo/CHANGELOG.md"
+  printf '%s\n' '#!/usr/bin/env bash' 'exit 0' >"$release_repo/bin/herdr-sesh"
+  chmod +x "$release_repo/bin/herdr-sesh"
+  git -C "$release_repo" add .
+  git -C "$release_repo" commit -qm 'chore(release): release v1.2.3'
+  git -C "$release_repo" remote add origin "$release_remote"
+}
+
+run_release_recipe() {
+  release_repo=$1
+  (
+    cd "$release_repo"
+    GITHUB_TOKEN=test-token \
+      GIT_CLIFF_OFFLINE=true \
+      PATH="$release_tools:$PATH" \
+      RELEASE_TEST_GIT_CLIFF="$git_cliff_bin" \
+      "$just_bin" --yes release v1.2.3
+  )
+}
+
+missing_token_repo="$tmp/release-missing-token"
+missing_token_remote="$tmp/release-missing-token.git"
+setup_release_repo "$missing_token_repo" "$missing_token_remote"
+if missing_token_error=$(
+  cd "$missing_token_repo"
+  env -u GITHUB_TOKEN \
+    GIT_CLIFF_OFFLINE=true \
+    PATH="$release_tools:$PATH" \
+    RELEASE_TEST_GIT_CLIFF="$git_cliff_bin" \
+    "$just_bin" --yes release v1.2.3 2>&1
+); then
+  echo 'release must require an authenticated GitHub metadata request' >&2
+  exit 1
+fi
+case "$missing_token_error" in
+  *'GITHUB_TOKEN is required for GitHub changelog metadata'*) ;;
+  *) echo "missing release token failed unclearly: $missing_token_error" >&2; exit 1 ;;
+esac
+
+success_repo="$tmp/release-success"
+success_remote="$tmp/release-success.git"
+setup_release_repo "$success_repo" "$success_remote"
+run_release_recipe "$success_repo"
+success_head=$(git -C "$success_repo" rev-parse HEAD)
+success_parent=$(git -C "$success_repo" rev-parse HEAD^)
+success_tag=$(git -C "$success_repo" rev-parse 'refs/tags/v1.2.3^{commit}')
+remote_head=$(git --git-dir="$success_remote" rev-parse refs/heads/main)
+remote_tag=$(git --git-dir="$success_remote" rev-parse 'refs/tags/v1.2.3^{commit}')
+if [ "$success_tag" != "$success_parent" ] ||
+  [ "$remote_head" != "$success_head" ] ||
+  [ "$remote_tag" != "$success_tag" ]; then
+  echo 'release recipe must atomically push the changelog commit and its tagged parent' >&2
+  exit 1
+fi
+if [ "$(git -C "$success_repo" diff-tree --no-commit-id --name-only -r HEAD)" != CHANGELOG.md ]; then
+  echo 'release recipe must commit only CHANGELOG.md' >&2
+  exit 1
+fi
+(
+  cd "$success_repo"
+  "$git_cliff_bin" --output "$tmp/post-tag-CHANGELOG.md"
+)
+if ! cmp -s "$success_repo/CHANGELOG.md" "$tmp/post-tag-CHANGELOG.md"; then
+  echo 'tag-triggered changelog generation must be a no-op on main' >&2
+  exit 1
+fi
+
+# Exercise the actual workflow step from a dirty tag checkout while main already
+# contains the release recipe's changelog commit.
+awk '
+  /- name: Prepare main branch update/ { step = 1; next }
+  step && /run: \|/ { script = 1; next }
+  script && /^      - name:/ { exit }
+  script { sub(/^          /, ""); print }
+' "$changelog_workflow" >"$tmp/prepare-changelog.sh"
+git -C "$success_repo" checkout -q --detach refs/tags/v1.2.3
+cp "$tmp/post-tag-CHANGELOG.md" "$success_repo/CHANGELOG.md"
+printf '\nUpdated GitHub metadata\n' >>"$success_repo/CHANGELOG.md"
+cp "$success_repo/CHANGELOG.md" "$tmp/expected-changelog.md"
+mkdir "$tmp/changelog-runner"
+(
+  cd "$success_repo"
+  RUNNER_TEMP="$tmp/changelog-runner" bash "$tmp/prepare-changelog.sh"
+)
+if [ "$(git -C "$success_repo" branch --show-current)" != main ] ||
+  [ "$(git -C "$success_repo" rev-parse HEAD)" != "$success_head" ] ||
+  ! cmp -s "$success_repo/CHANGELOG.md" "$tmp/expected-changelog.md"; then
+  echo 'changelog workflow must preserve generated content when switching from the tag to main' >&2
+  exit 1
+fi
+
+branch_repo="$tmp/release-branch"
+branch_remote="$tmp/release-branch.git"
+setup_release_repo "$branch_repo" "$branch_remote"
+git -C "$branch_repo" switch -qc release/v1.2.3
+if branch_error=$(run_release_recipe "$branch_repo" 2>&1); then
+  echo 'release recipe must reject non-main branches' >&2
+  exit 1
+fi
+case "$branch_error" in
+  *'Releases must be created from main, got: release/v1.2.3'*) ;;
+  *) echo "non-main release failed unclearly: $branch_error" >&2; exit 1 ;;
+esac
+if git -C "$branch_repo" rev-parse --verify --quiet refs/tags/v1.2.3 >/dev/null; then
+  echo 'rejected non-main release must not create a tag' >&2
+  exit 1
+fi
+
+failure_repo="$tmp/release-commit-failure"
+failure_remote="$tmp/release-commit-failure.git"
+setup_release_repo "$failure_repo" "$failure_remote"
+printf '%s\n' '#!/usr/bin/env bash' 'exit 1' >"$failure_repo/.git/hooks/pre-commit"
+chmod +x "$failure_repo/.git/hooks/pre-commit"
+if run_release_recipe "$failure_repo" >/dev/null 2>&1; then
+  echo 'release recipe must propagate changelog commit failures' >&2
+  exit 1
+fi
+if git -C "$failure_repo" rev-parse --verify --quiet refs/tags/v1.2.3 >/dev/null; then
+  echo 'failed changelog commit must remove the unpushed release tag' >&2
+  exit 1
+fi
+if ! git -C "$failure_repo" diff --quiet -- CHANGELOG.md ||
+  ! git -C "$failure_repo" diff --cached --quiet -- CHANGELOG.md; then
+  echo 'failed changelog commit must restore CHANGELOG.md in the worktree and index' >&2
+  exit 1
+fi
+printf '%s\n' '#!/usr/bin/env bash' 'exit 0' >"$failure_repo/.git/hooks/pre-commit"
+if ! run_release_recipe "$failure_repo" >/dev/null 2>&1; then
+  echo 'release recipe must be retryable after a transient commit failure' >&2
+  exit 1
+fi

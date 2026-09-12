@@ -1,22 +1,56 @@
 # Configuration
 
-`herdr-sesh` accepts a deliberate subset of Sesh TOML. The fields below are the
-implemented contract; tmux-specific Sesh settings are not supported by Herdr.
+`herdr-sesh` reads a versioned native TOML config. Every native file starts
+with `version = 1` and unknown keys are always rejected. Legacy
+Sesh-compatible files (no `version` key) still load during the migration
+period and print a deprecation warning on stderr; see
+[Legacy migration](#legacy-migration).
 
 Lookup order:
 
 1. `--config PATH`
-2. `HERDR_SESH_CONFIG`
-3. `${HERDR_PLUGIN_CONFIG_DIR}/sesh.toml`
-4. `~/.config/sesh/sesh.toml`
+2. `HERDR_SESH_CONFIG` (an error if the file does not exist)
+3. `${HERDR_PLUGIN_CONFIG_DIR}/config.toml`
+4. `${HERDR_PLUGIN_CONFIG_DIR}/sesh.toml` as a legacy fallback
+5. `~/.config/herdr-sesh/config.toml`
+6. `~/.config/herdr-sesh/sesh.toml` as a legacy fallback
+7. `~/.config/sesh/sesh.toml` as a legacy fallback
 
-For a linked Herdr plugin, create or inspect the plugin-owned config with:
+Explicit paths (`--config`, `HERDR_SESH_CONFIG`) may hold either schema: a
+top-level `version` key selects native decoding, otherwise the file is treated
+as legacy. `config path` prints the file that would load, or the native
+`config.toml` destination when none exists. `config init` writes a native
+starter file only when no config exists anywhere in the lookup order; an
+existing config (legacy included) is printed instead so init can never shadow
+it. With `HERDR_SESH_CONFIG` set to a missing path, init creates the starter
+at that exact path. `config validate [PATH]` strictly validates the active or
+specified config and prints its resolved path on success. It returns an error
+when no config exists; legacy files remain valid but emit the migration warning.
 
-```bash
-just install-plugin
-HERDR_PLUGIN_CONFIG_DIR="$(herdr plugin config-dir RooseveltAdvisors.herdr-sesh)" ./bin/herdr-sesh config init
-HERDR_PLUGIN_CONFIG_DIR="$(herdr plugin config-dir RooseveltAdvisors.herdr-sesh)" ./bin/herdr-sesh config path
-```
+## Create your configuration
+
+=== "Installed plugin"
+
+    Run these commands in a shell with Herdr available. `jq` is used to read
+    the installed plugin path from Herdr's JSON output.
+
+    ```bash
+    sesh_root="$(herdr plugin list --plugin RooseveltAdvisors.herdr-sesh --json | jq -r '.result.plugins[0].plugin_root')"
+    export HERDR_PLUGIN_CONFIG_DIR="$(herdr plugin config-dir RooseveltAdvisors.herdr-sesh)"
+    "$sesh_root/bin/herdr-sesh" config init
+    "$sesh_root/bin/herdr-sesh" config path
+    ```
+
+=== "Local checkout"
+
+    From the repository root:
+
+    ```bash
+    just install-plugin
+    export HERDR_PLUGIN_CONFIG_DIR="$(herdr plugin config-dir RooseveltAdvisors.herdr-sesh)"
+    ./bin/herdr-sesh config init
+    ./bin/herdr-sesh config path
+    ```
 
 Herdr creates `HERDR_PLUGIN_CONFIG_DIR` and `HERDR_PLUGIN_STATE_DIR` for the
 plugin. Keep user configuration in the config directory and runtime state in
@@ -24,28 +58,296 @@ the state directory. Runtime state for non-default `HERDR_SESSION` values is
 kept in a session-specific subdirectory; the default session continues to use
 the state directory root.
 
-## Top-level fields
+### Add a workspace with a tab
+
+Open the file printed by `config path`. Keep its `version = 1` line, then add
+the following entries, replacing the path with an existing Git checkout:
+
+If the existing file uses the legacy schema, [migrate it](#legacy-migration)
+before adding native entries. Use unique workspace and tab names if the file
+already defines them.
+
+```toml
+[[tab]]
+name = "git"
+startup = "git status"
+
+[[workspace]]
+name = "my-project"
+path = "~/projects/my-project"
+tabs = ["git"]
+```
+
+Validate the file:
+
+=== "Installed plugin"
+
+    ```bash
+    sesh_root="$(herdr plugin list --plugin RooseveltAdvisors.herdr-sesh --json | jq -r '.result.plugins[0].plugin_root')"
+    export HERDR_PLUGIN_CONFIG_DIR="$(herdr plugin config-dir RooseveltAdvisors.herdr-sesh)"
+    "$sesh_root/bin/herdr-sesh" config validate
+    ```
+
+=== "Local checkout"
+
+    ```bash
+    export HERDR_PLUGIN_CONFIG_DIR="$(herdr plugin config-dir RooseveltAdvisors.herdr-sesh)"
+    ./bin/herdr-sesh config validate
+    ```
+
+Open the picker, search for `my-project`, and press ++enter++. A newly created
+workspace receives the named `git` tab and runs `git status` there. Selecting
+an existing workspace focuses it; it does not recreate its tabs or rerun startup
+commands.
+
+## Example
+
+This is a customization example, not a dump of the defaults. Omitted settings
+use the defaults described in [Settings](#settings).
+
+```toml
+version = 1 # (1)!
+
+[list]
+cache = true
+source_order = ["herdr", "config", "zoxide", "dir"] # (2)!
+blacklist = ["^scratch$"]
+
+[naming]
+path_components = 1
+
+[picker]
+show_icons = true
+show_path = true
+show_preview = true
+preview_mode = "command"
+prioritize_home = false
+herdr_theme_inherit = true
+replace_worktree_icon = true
+prompt = "Sesh> "
+placeholder = "Search workspaces"
+separator_aware = true
+workspace_sort = "agent"
+show_last_workspace = true
+show_last_workspace_path = false
+
+[workspace_defaults]
+startup = "git status"
+preview = "eza --icons=always --color=always -la {}"
+
+[[tab]]
+name = "git"
+startup = "git status"
+
+[[workspace]]
+name = "brain"
+path = "~/brain"
+disable_startup = true
+tabs = ["git"] # (3)!
+
+[[rule]]
+path_glob = "~/projects/**"
+startup = "git status"
+preview = "eza --icons=always --color=always -la {}"
+tabs = ["git"]
+```
+
+1. Native configuration requires this schema version; unknown keys are rejected.
+2. Source order controls how results are combined; picker sorting affects Herdr rows.
+3. Tab names refer to `[[tab]]` definitions. They are created when the workspace is new.
+
+## Legacy migration
+
+Legacy Sesh-compatible files keep loading for at least one released version.
+Run `config migrate` to convert the active legacy file automatically:
+
+=== "Local checkout"
+
+    ```bash
+    export HERDR_PLUGIN_CONFIG_DIR="$(herdr plugin config-dir RooseveltAdvisors.herdr-sesh)"
+    ./bin/herdr-sesh config migrate
+    ```
+
+=== "Installed plugin"
+
+    ```bash
+    sesh_root="$(herdr plugin list --plugin RooseveltAdvisors.herdr-sesh --json | jq -r '.result.plugins[0].plugin_root')"
+    export HERDR_PLUGIN_CONFIG_DIR="$(herdr plugin config-dir RooseveltAdvisors.herdr-sesh)"
+    "$sesh_root/bin/herdr-sesh" config migrate
+    ```
+
+Conversion intentionally modernizes two defaults: when
+`tui.show_icons` was never set, the native config enables icons; and the former
+colorless default preview (`eza --icons=always -la {}`) is replaced by the
+color-forced runtime default. Explicit icon settings and custom preview commands
+are preserved. The command flattens any `import` files into a native
+`config.toml`, leaves the legacy file untouched, and prints the new path.
+
+Pass `--config PATH` to convert a specific file. The command refuses to
+overwrite an existing native file unless `--force` is passed; even with
+`--force`, unrelated or invalid `config.toml` files are never replaced. The
+native file is installed atomically with `0600` permissions. A specific file can
+also be supplied positionally, for example
+`herdr-sesh config migrate ~/.config/sesh/sesh.toml --force`. Values the native
+schema rejects (invalid regexes, duplicate names, missing tab references) fail
+with an error before anything is written. Comments and key order do not survive
+conversion.
+Delete the legacy file once the native one looks right. If
+`HERDR_SESH_CONFIG` selects the legacy file, point it at the printed native path
+before deleting the legacy file. A legacy file already named `config.toml`
+cannot be migrated in place, even with `--force`; rename it first so migration
+can leave the source untouched.
+
+??? info "Manual migration: legacy → native key reference"
+
+    Rename keys as follows; unlisted fields keep their meaning under the
+    renamed table.
+
+    | Legacy key | Native key |
+    | --- | --- |
+    | `cache` | `list.cache` |
+    | `strict_mode` | Removed; native decoding is always strict |
+    | `import` | Unsupported in native version 1 |
+    | `blacklist` | `list.blacklist` |
+    | `sort_order` | `list.source_order` |
+    | `dir_length` | `naming.path_components` |
+    | `separator_aware` | `picker.separator_aware` |
+    | `tui.show_icons` | `picker.show_icons` |
+    | `tui.herdr_theme_inherit` | `picker.herdr_theme_inherit` |
+    | `tui.replace_worktree_icon` | `picker.replace_worktree_icon` |
+    | `tui.show_last_workspace` | `picker.show_last_workspace` |
+    | `tui.show_last_workspace_path` | `picker.show_last_workspace_path` |
+    | `tui.prompt` | `picker.prompt` |
+    | `tui.placeholder` | `picker.placeholder` |
+    | `tui.default_sort` | `picker.workspace_sort` (`workspace`, `recent`, or `agent`) |
+    | `default_session.startup_command` | `workspace_defaults.startup` |
+    | `default_session.preview_command` | `workspace_defaults.preview` |
+    | `session[]` | `workspace[]` |
+    | `session[].startup_command` | `workspace[].startup` |
+    | `session[].preview_command` | `workspace[].preview` |
+    | `session[].disable_startup_command` | `workspace[].disable_startup` |
+    | `session[].windows` | `workspace[].tabs` |
+    | `window[]` | `tab[]` |
+    | `window[].startup_script` | `tab[].startup` |
+    | `window[].path` | `tab[].path` |
+    | `wildcard[]` | `rule[]` |
+    | `wildcard[].pattern` | `rule[].path_glob` |
+    | `wildcard[].startup_command` | `rule[].startup` |
+    | `wildcard[].preview_command` | `rule[].preview` |
+    | `wildcard[].disable_startup_command` | `rule[].disable_startup` |
+    | `wildcard[].windows` | `rule[].tabs` |
+
+!!! warning "Stray `version` keys in legacy files"
+
+    A legacy file containing a stray top-level `version` key was silently
+    ignored before and now selects strict native decoding, which fails hard on
+    the remaining legacy keys. Remove the key or migrate the file.
+
+Legacy `tmux_command`, `tmuxp`, and `tmuxinator` fields have no Herdr
+equivalent; native decoding rejects them like any other unknown key.
+
+
+## Settings
+
+### `[list]`
 
 | Field | Runtime effect |
 | --- | --- |
-| `cache` | Caches normal deduplicated `list` results for five seconds in the current session's plugin state directory, scoped to the resolved config file. It does not cache `list --blacklisted`, `list --hide-duplicates=false`, `picker`, or `connect`. |
-| `strict_mode` | Rejects unknown fields in this file and its imported files. Without strict mode, unknown fields are ignored. |
-| `import` | Loads additional TOML files before the current file. Relative paths are resolved from the importing file; `~/` is expanded. |
-| `blacklist` | Treats each value as a regular expression matched against session names. Normal listings hide matches; `list --blacklisted` shows them. |
-| `sort_order` | Orders sources such as `herdr`, `config`, `zoxide`, and `dir`. Sources omitted from the list are appended. |
-| `dir_length` | Sets the number of path components used by the directory-name fallback for a newly created direct-path workspace. Git repositories keep their repository-derived name. The default and minimum effective value are `1`. |
-| `separator_aware` | Makes native and fzf picker searches treat `-`, `_`, `/`, and `.` as spaces. |
+| `cache` | Caches normal deduplicated `list` results for five seconds in `HERDR_PLUGIN_STATE_DIR`, scoped to the resolved config file. It does not cache `list --blacklisted`, `list --hide-duplicates=false`, `picker`, or `connect`. |
+| `source_order` | Orders sources among `herdr`, `config`, `zoxide`, and `dir`. Unknown or duplicated names are rejected; sources omitted from the list are appended. |
+| `blacklist` | Treats each value as a regular expression matched against workspace names. Normal listings hide matches; `list --blacklisted` shows them. Invalid regexes are rejected. |
 
-## Picker fields
+### `[naming]`
 
-`[tui]` supports:
+| Field | Runtime effect |
+| --- | --- |
+| `path_components` | Sets the number of path components used by the directory-name fallback for a newly created direct-path workspace. Git repositories keep their repository-derived name. Must be at least `1` (the default). |
+
+### `[keys]`
+
+```toml
+[keys]
+cycle_preview_mode = "ctrl+o"
+```
+
+`cycle_preview_mode` changes the native picker's preview-mode shortcut. Omit it
+for `"ctrl+o"`, choose a key such as `"alt+p"` or `"f2"`, or set it to `""` to
+disable cycling and hide the shortcut hint. Key names use Bubble Tea's exact,
+case-sensitive spelling: a single printable character or a named key, with
+modifiers joined by `+` in `ctrl`, `alt`, `shift`, `meta`, `hyper`, `super` order.
+Unsupported names, duplicate modifiers, and incorrect modifier order are rejected
+as configuration errors. For shifted printable keys, configure the resulting
+character (`"P"` rather than `"shift+p"`, or `"?"` rather than `"shift+/"`).
+Shift-only printable spellings are rejected because key events report the text;
+combinations such as `"ctrl+shift+p"` and `"shift+f2"` remain valid. When Shift is
+combined with other modifiers, use the unshifted base key: `"ctrl+shift+p"`, not
+`"ctrl+shift+P"`, and `"alt+shift+/"`, not `"alt+shift+?"`.
+The configured shortcut
+takes precedence over other native picker bindings, so choose an unused key.
+Disabling cycling leaves the initial `[picker].preview_mode` in effect and
+returns keys to their normal picker/input handling. This does not affect fzf or
+configure shortcuts in Herdr itself.
+
+### `[picker]`
 
 | Field | Runtime effect |
 | --- | --- |
 | `show_icons` | Shows Nerd Font source icons in the native picker. The default is `false`; source names remain visible when icons are hidden. |
+| `show_path` | Shows the path column in the native picker when space permits (default `true`). Set it to `false` to hide the column and give the side-by-side preview 50% of the available width initially. The divider remains draggable; narrow terminals keep stacked previews. This does not affect path matching, the last-workspace footer, or fzf. |
+| `show_preview` | Shows the preview panel in the native picker. The default is `true`; set it to `false` to give the workspace list the full available width and height without running preview commands. This does not change fzf preview behavior. |
+| `preview_mode` | Sets the native picker's initial preview to `command` (the configured preview command or built-in fallback, the default) or `pane` (the active pane of the selected Herdr workspace, refreshed once per second). Press ++ctrl+o++ (or `keys.cycle_preview_mode`) to switch modes while the picker is open. `show_preview = false` still disables previews. This does not affect fzf or `herdr-sesh preview`. |
+| `prioritize_home` | Controls exact case-insensitive `home` searches in the native picker. The default is `true`, which promotes the actual home-directory session ahead of real-name and ordinary path matches. Set it to `false` to keep real-name matches first, then path matches in their existing order; the actual home-directory session remains searchable through the exact `home` alias. |
+| `herdr_theme_inherit` | Inherits colors from Herdr's active theme. The default is `true`; set it to `false` to keep the native picker's built-in colors. |
+| `replace_worktree_icon` | Replaces the Herdr sheep icon with `↳` for linked worktree rows. The default is `true`. Set it to `false` to keep the sheep icon (or plain `[herdr]` when icons are hidden); the purple type color and tree branches remain. |
 | `prompt` | Replaces the picker prompt. An empty value uses `Sesh> `. |
 | `placeholder` | Replaces the picker placeholder. An empty value uses `Filter workspaces`. |
-| `default_sort` | Sets the native picker's initial Herdr workspace order to `workspace` (Herdr's order, the default) or `recent` (most recently visited first). Press `ctrl+r` to switch modes while the picker is open. |
+| `separator_aware` | Makes native and fzf picker searches treat `-`, `_`, `/`, and `.` as spaces. |
+| `workspace_sort` | Sets the native picker's initial Herdr workspace order to `workspace` (Herdr's order, the default), `recent` (most recently visited first), or `agent` (agent-status priority). Press ++ctrl+r++ to cycle `workspace` → `recent` → `agent` while the picker is open. This setting does not affect fzf or JSON output. |
+| `show_last_workspace` | Shows the workspace targeted by `herdr-sesh last` in the picker footer. The default is `true`; set it to `false` to disable the feature. |
+| `show_last_workspace_path` | Shows the Herdr workspace working directory beside the last workspace name. The default is `true`; set it to `false` to show only the workspace name. |
+
+#### Search ranking
+
+The native picker matches names and paths case-insensitively and places name
+matches before path-only matches, retaining the existing order within each
+group. For example, searching `api` puts a workspace named `api` ahead of one
+named `web` whose path contains `/api/`. `workspace_sort` determines the Herdr
+workspace order within these match groups.
+
+An exact `home` query also matches the actual home-directory session, even if
+its name does not contain `home`. With `prioritize_home = true` (the default),
+that session comes first. With `false`, it stays in the path-match group.
+These ranking rules apply only to the native picker; fzf uses its own ranking.
+
+#### Preview controls
+
+When the native picker shows the preview beside the workspace list, click and
+drag the vertical divider with the left mouse button to resize it. Both panels
+keep a minimum width. The chosen width lasts until the picker closes; narrow
+terminals continue to show the preview below the list.
+
+See [Keybindings](keybindings.md) for switching between command and active-pane
+previews. Pane mode reads visible terminal contents without focusing the selected
+workspace or running its configured preview command.
+
+#### Workspace history
+
+`herdr-sesh last`, the previous-workspace footer, and recent sorting use history
+that also tracks workspace switches made through Herdr's own controls or CLI.
+The installed plugin starts tracking automatically through startup, focus, and
+close hooks; no additional keybinding or configuration is required. Closed
+workspaces are removed from history.
+
+History is separate for each Herdr session, keyed by `HERDR_SESSION` and the
+session's socket path. Existing unscoped history is copied on first use for the
+default session only; named sessions start with their own history. Hiding the
+footer with `show_last_workspace = false` does not disable history tracking or
+the `last` command.
+
+See [Workspace history tracking](development/workspace-history.md) for state
+paths, lifecycle, persistence, and reconnect limitations.
+
+#### Cursor and status indicators
 
 Native picker controls include `ctrl+j`/`ctrl+k` to move the selection, `ctrl+r`
 to switch workspace sorting, and `ctrl+x` to close the selected Herdr
@@ -67,95 +369,111 @@ instantaneous without drawing any preset's trail.
 Open Herdr workspaces show the agent state reported by Herdr: an animated amber
 Jump spinner (`⢄⢂⢁⡁⡈⡐⡠`) while working, red `◉` when blocked, green `✓` when idle,
 and teal `●` when done. Workspaces with an unknown state have no indicator.
+Herdr calls an actively running agent `working`.
 
-## Session behavior
+The native picker's `agent` sort mode orders recognized states as blocked →
+done → working → idle, followed by workspaces with no agent or an unknown
+state. Ties retain Herdr's original workspace order, including unrecognized
+future states. Live status refreshes update this order without changing the
+selected workspace. Sorting only rearranges Herdr rows within their configured
+source-order slots; it does not move them ahead of `config`, `zoxide`, or `dir`
+rows when `list.source_order` puts those sources first.
 
-`[default_session]` supports only:
+### Picker colors
 
-| Field | Runtime effect |
-| --- | --- |
-| `startup_command` | Fallback command run after a new Herdr workspace is created. `{}` is replaced with the session path. |
-| `preview_command` | Fallback command used by `preview` and the native picker. `{}` is replaced with the session path. |
-
-`[[session]]` supports:
-
-| Field | Runtime effect |
-| --- | --- |
-| `name` | Session label and connect target. |
-| `path` | Workspace path; `~/` is expanded before it is sent to Herdr. |
-| `startup_command` | Session-specific startup command. |
-| `preview_command` | Session-specific preview command. |
-| `disable_startup_command` | Suppresses startup execution when `true`. |
-| `windows` | Names of `[[window]]` entries to create as Herdr tabs. |
-
-Startup commands are selected in this order: the explicit session command, the
-first matching wildcard command, then `[default_session].startup_command`.
-Preview commands use the same explicit session, wildcard, then default order.
-
-`[[window]]` supports:
-
-| Field | Runtime effect |
-| --- | --- |
-| `name` | Name referenced by a session or wildcard `windows` list and used as the Herdr tab label. |
-| `path` | Optional tab working directory. Without it, the session path is used; `~/` is expanded. |
-| `startup_script` | Command run in the new tab. `{}` is replaced with that tab's working directory. |
-
-## Wildcards
-
-Wildcard startup, preview, and disable settings apply to every matching session
-when the corresponding explicit session field is unset. Wildcard windows apply
-only to discovered or direct-path sessions. The first matching wildcard wins.
-
-| Field | Runtime effect |
-| --- | --- |
-| `pattern` | Path glob. `*`, `?`, and character classes use `filepath.Match` semantics; a trailing `/**` matches the base directory and all descendants. |
-| `startup_command` | Startup command for a matching path. |
-| `preview_command` | Preview command for a matching path. |
-| `disable_startup_command` | Suppresses wildcard and default startup behavior for a matching path when `true`. |
-| `windows` | `[[window]]` entries created for a matching discovered or direct-path session, not a configured session. |
-
-## Unsupported Sesh fields
-
-`tmux_command`, `tmuxp`, and `tmuxinator` have no Herdr equivalent and are not
-supported. `windows` is supported on `[[session]]` and `[[wildcard]]`, but not
-under `[default_session]`. These and any other unknown fields are rejected when
-`strict_mode = true`; otherwise they are ignored rather than changing runtime
-behavior. The generated starter config therefore does not reference Sesh's
-broader JSON schema.
-
-## Example
+By default, the native picker inherits colors from Herdr's own theme so it
+matches the running Herdr UI. Disable inheritance to keep the picker's built-in
+colors:
 
 ```toml
-cache = true
-strict_mode = true
-sort_order = ["herdr", "config", "zoxide", "dir"]
-dir_length = 1
-separator_aware = true
-blacklist = ["^scratch$"]
-
-[tui]
-show_icons = true
-prompt = "Sesh> "
-placeholder = "Search workspaces"
-default_sort = "recent"
-
-[default_session]
-startup_command = "git status"
-preview_command = "eza --icons=always -la {}"
-
-[[window]]
-name = "git"
-startup_script = "git status"
-
-[[session]]
-name = "brain"
-path = "~/brain"
-disable_startup_command = true
-windows = ["git"]
-
-[[wildcard]]
-pattern = "~/projects/**"
-startup_command = "git status"
-preview_command = "eza --icons=always -la {}"
-windows = ["git"]
+[picker]
+herdr_theme_inherit = false
 ```
+
+When enabled, it reads the same config file Herdr uses (`HERDR_CONFIG_PATH`,
+then `$XDG_CONFIG_HOME/herdr/config.toml`, then
+`~/.config/herdr/config.toml`) and resolves `[theme] name` against Herdr's
+built-in themes:
+
+`catppuccin` (default), `catppuccin-latte`, `tokyo-night`, `tokyo-night-day`,
+`dracula`, `nord`, `gruvbox`, `gruvbox-light`, `one-dark`, `one-light`,
+`solarized`, `solarized-light`, `kanagawa`, `kanagawa-lotus`, `rose-pine`,
+`rose-pine-dawn`, and `vesper`. Common aliases (`catppuccin-mocha`,
+`tokyonight`, `onedark`, …) are accepted, as are `[theme.custom]` overrides on
+top of any base theme.
+
+| Herdr token | Picker role |
+| --- | --- |
+| `accent` | Prompt, cursor, and selection rail |
+| `mauve` | Title, section headers, search matches, smear trail |
+| `text` | Row labels |
+| `subtext0` | Paths, counts, help text |
+| `green` | Idle agents (`✓`) |
+| `yellow` | Working agents (spinner) and the empty-state message |
+| `red` | Blocked agents (`◉`) |
+| `overlay1` | Ghost cursor trail |
+
+Custom tokens that are unknown or not a `#RGB`/`#RRGGBB` hex value leave that
+role's built-in color in place, so partial `[theme.custom]` tables only affect
+the roles they define. The ANSI-based `terminal` theme has no fixed palette to
+inherit; the picker keeps its built-in colors there unless you add explicit
+overrides.
+
+The native picker marks a linked Git worktree workspace with a purple
+`↳ herdr` type label, replacing the normal Herdr sheep icon, and groups it
+immediately beneath its open parent workspace in workspace, recent, and agent
+sort modes, matching Herdr's sidebar. In agent mode, the highest-priority status
+on any family member ranks the whole family; the parent remains first and its
+children follow in agent-priority order. With icons disabled, the label is `[↳ herdr]`.
+When the parent is visible, `├─` and `└─` branches reinforce the family in the
+workspace-name column. Wide layouts show the worktree path in the secondary
+column when space permits; narrow layouts retain the purple type label. This is
+automatic and does not depend on `show_icons`. Set
+`picker.replace_worktree_icon = false` to retain the normal sheep icon or plain
+`[herdr]` label while keeping the other child-worktree cues. If Herdr reports a
+linked worktree but no single open parent can be resolved, the row remains
+ungrouped rather than inventing a parent.
+
+### `[workspace_defaults]`
+
+| Field | Runtime effect |
+| --- | --- |
+| `startup` | Fallback command run after a new Herdr workspace is created. `{}` is replaced with the workspace path. |
+| `preview` | Fallback command used by `preview` and the native picker. `{}` is replaced with the workspace path. Absent or empty values use the built-in `eza` preview. |
+
+### `[[workspace]]`
+
+| Field | Runtime effect |
+| --- | --- |
+| `name` | Workspace label and connect target. Must be non-empty and unique. |
+| `path` | Workspace path; `~/` is expanded before it is sent to Herdr. Must be non-empty. |
+| `startup` | Workspace-specific startup command. |
+| `preview` | Workspace-specific preview command. |
+| `disable_startup` | Suppresses startup execution when `true`. |
+| `tabs` | Names of `[[tab]]` entries to create as Herdr tabs. Every referenced tab must exist. |
+
+Startup commands are selected in this order: the explicit workspace command,
+the first matching rule command, then `workspace_defaults.startup`. Preview
+commands use the same explicit workspace, rule, then default order.
+
+### `[[tab]]`
+
+| Field | Runtime effect |
+| --- | --- |
+| `name` | Name referenced by a workspace or rule `tabs` list and used as the Herdr tab label. Must be non-empty and unique. |
+| `path` | Optional tab working directory. Without it, the workspace path is used; `~/` is expanded. |
+| `startup` | Command run in the new tab. `{}` is replaced with that tab's working directory. |
+
+### `[[rule]]`
+
+Rule startup, preview, and disable settings apply to every matching workspace
+when the corresponding explicit workspace field is unset. Rule tabs apply only
+to discovered or direct-path workspaces. The first matching rule wins.
+
+| Field | Runtime effect |
+| --- | --- |
+| `path_glob` | Path glob. `*`, `?`, and character classes use `filepath.Match` semantics; a trailing `/**` matches the base directory and all descendants. Must be non-empty and compile. |
+| `startup` | Startup command for a matching path. |
+| `preview` | Preview command for a matching path. |
+| `disable_startup` | Suppresses rule and default startup behavior for a matching path when `true`. |
+| `tabs` | `[[tab]]` entries created for a matching discovered or direct-path workspace, not a configured workspace. |
