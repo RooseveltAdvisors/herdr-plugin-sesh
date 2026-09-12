@@ -4,3 +4,10 @@ bin/
 coverage.out
 .backpass/
 evidence/
+plans/
+.pi/
+scratch/
+mise.local.toml
+.envrc
+.venv/
+site/

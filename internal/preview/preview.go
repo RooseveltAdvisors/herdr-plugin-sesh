@@ -3,17 +3,29 @@ package preview
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"sort"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/fullerzz/herdr-plugin-sesh/internal/config"
+	"github.com/fullerzz/herdr-plugin-sesh/internal/herdr"
 	"github.com/fullerzz/herdr-plugin-sesh/internal/model"
 )
+
+func RenderPane(ctx context.Context, s model.Session) (string, error) {
+	if s.Source != "herdr" || s.WorkspaceID == "" {
+		return "Pane preview is only available for running Herdr workspaces\n", nil
+	}
+	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	return herdr.NewCLIClient().WorkspacePaneRead(ctx, s.WorkspaceID)
+}
 
 func Render(ctx context.Context, s model.Session, fallbackCommand string) (string, error) {
 	if s.Path == "" {
@@ -39,14 +51,39 @@ func Render(ctx context.Context, s model.Session, fallbackCommand string) (strin
 func runShell(ctx context.Context, command string) (string, error) {
 	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
+	sentinel := exec.Command("sh", "-c", `kill -s STOP "$$"`)
+	sentinel.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	if err := sentinel.Start(); err != nil {
+		return "", err
+	}
+	processGroupID := sentinel.Process.Pid
+	killProcessGroup := func() error {
+		err := syscall.Kill(-processGroupID, syscall.SIGKILL)
+		if errors.Is(err, syscall.ESRCH) {
+			return os.ErrProcessDone
+		}
+		return err
+	}
 	//nolint:gosec // preview commands are user-configured shell snippets by design.
 	c := exec.CommandContext(ctx, "sh", "-lc", command)
+	c.SysProcAttr = &syscall.SysProcAttr{Setpgid: true, Pgid: processGroupID}
+	c.Cancel = killProcessGroup
+	c.WaitDelay = 250 * time.Millisecond
 	var out, errb bytes.Buffer
 	c.Stdout = &out
 	c.Stderr = &errb
 	err := c.Run()
+	killErr := killProcessGroup()
+	if killErr != nil {
+		_ = sentinel.Process.Kill()
+	}
+	_ = sentinel.Wait()
+	output := out.String() + errb.String()
 	if err != nil {
-		return out.String() + errb.String(), err
+		return output, err
+	}
+	if killErr != nil {
+		return output, killErr
 	}
 	return out.String(), nil
 }

@@ -3,11 +3,19 @@ package config
 import "github.com/fullerzz/herdr-plugin-sesh/internal/model"
 
 const (
-	DefaultPreviewCommand = "eza --icons=always -la {}"
+	// Preview output is captured through sh rather than a TTY, so eza's
+	// automatic modes must be forced on explicitly.
+	DefaultPreviewCommand = "eza --icons=always --color=always -la {}"
+	DefaultPreviewMode    = "command"
 	DefaultWorkspaceSort  = "workspace"
 )
 
+type KeyConfig struct {
+	CyclePreviewMode string
+}
+
 type Config struct {
+	Keys                 KeyConfig            `toml:"-"`
 	Cache                bool                 `toml:"cache"`
 	StrictMode           bool                 `toml:"strict_mode"`
 	ImportPaths          []string             `toml:"import"`
@@ -37,10 +45,19 @@ type SessionConfig struct {
 }
 
 type TUIConfig struct {
-	ShowIcons   bool   `toml:"show_icons"`
-	Prompt      string `toml:"prompt"`
-	Placeholder string `toml:"placeholder"`
-	DefaultSort string `toml:"default_sort"`
+	ShowIcons bool `toml:"show_icons"`
+	// ShowPath and ShowPreview are native-only; the legacy Sesh schema has no equivalents.
+	ShowPath              bool   `toml:"-"`
+	ShowPreview           bool   `toml:"-"`
+	PreviewMode           string `toml:"-"`
+	PrioritizeHome        bool   `toml:"-"`
+	HerdrThemeInherit     bool   `toml:"herdr_theme_inherit"`
+	ReplaceWorktreeIcon   bool   `toml:"replace_worktree_icon"`
+	ShowLastWorkspace     bool   `toml:"show_last_workspace"`
+	ShowLastWorkspacePath bool   `toml:"show_last_workspace_path"`
+	Prompt                string `toml:"prompt"`
+	Placeholder           string `toml:"placeholder"`
+	DefaultSort           string `toml:"default_sort"`
 }
 
 type WildcardConfig struct {
@@ -53,9 +70,20 @@ type WildcardConfig struct {
 
 func Default() Config {
 	return Config{
+		Keys:                 KeyConfig{CyclePreviewMode: "ctrl+o"},
 		DirLength:            1,
 		SortOrder:            []string{"herdr", "config", "zoxide", "dir"},
 		DefaultSessionConfig: DefaultSessionConfig{PreviewCommand: DefaultPreviewCommand},
-		TUI:                  TUIConfig{DefaultSort: DefaultWorkspaceSort},
+		TUI: TUIConfig{
+			DefaultSort:           DefaultWorkspaceSort,
+			ShowPath:              true,
+			ShowPreview:           true,
+			PreviewMode:           DefaultPreviewMode,
+			PrioritizeHome:        true,
+			HerdrThemeInherit:     true,
+			ReplaceWorktreeIcon:   true,
+			ShowLastWorkspace:     true,
+			ShowLastWorkspacePath: true,
+		},
 	}
 }
