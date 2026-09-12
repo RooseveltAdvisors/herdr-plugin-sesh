@@ -13,6 +13,8 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/fullerzz/herdr-plugin-sesh/internal/state"
 )
 
 func TestWatchWorkspaceEventsReconcilesDelayedProtocol20Replay(t *testing.T) {
@@ -394,6 +396,140 @@ func TestWatchWorkspaceEventsReconnectsAfterUnexpectedEOF(t *testing.T) {
 	require.NoError(t, <-serverDone)
 	want := []string{"focus:after-reconnect", "close:after-reconnect"}
 	assert.Equal(t, want, got)
+}
+
+func TestWatchWorkspaceEventsProtocol20ResyncKeepsAgentJumpSkip(t *testing.T) {
+	dir := t.TempDir()
+	require.NoError(t, state.SaveFocusMRU(dir, state.FocusMRU{
+		WorkspaceCurrent: "W1",
+		WorkspaceLast:    "W0",
+		Migrated:         true,
+	}))
+
+	listener, socketPath := listenTestSocket(t)
+	jumpArmed := make(chan struct{})
+	serverDone := make(chan error, 1)
+	go func() {
+		stream, err := acceptRequest(listener, "events.subscribe")
+		if err != nil {
+			serverDone <- err
+			return
+		}
+		enc := json.NewEncoder(stream)
+		if err := enc.Encode(map[string]any{"id": "herdr-sesh-history", "result": map[string]any{"type": "subscription_started"}}); err != nil {
+			_ = stream.Close()
+			serverDone <- err
+			return
+		}
+		if err := serveCompatiblePing(listener, 20); err != nil {
+			_ = stream.Close()
+			serverDone <- err
+			return
+		}
+		snapshot, err := acceptRequest(listener, "session.snapshot")
+		if err != nil {
+			_ = stream.Close()
+			serverDone <- err
+			return
+		}
+		if err := json.NewEncoder(snapshot).Encode(snapshotResponse("W1", "W1", "W0", "W3")); err != nil {
+			_ = snapshot.Close()
+			_ = stream.Close()
+			serverDone <- err
+			return
+		}
+		_ = snapshot.Close()
+		<-jumpArmed
+		if err := enc.Encode(workspaceEventMessage("workspace_focused", "W3")); err != nil {
+			_ = stream.Close()
+			serverDone <- err
+			return
+		}
+		batchSnapshot, err := acceptRequest(listener, "session.snapshot")
+		if err != nil {
+			_ = stream.Close()
+			serverDone <- err
+			return
+		}
+		if err := json.NewEncoder(batchSnapshot).Encode(snapshotResponse("W3", "W1", "W0", "W3")); err != nil {
+			_ = batchSnapshot.Close()
+			_ = stream.Close()
+			serverDone <- err
+			return
+		}
+		_ = batchSnapshot.Close()
+		_ = stream.Close()
+		serverDone <- nil
+	}()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	observed := make(chan string, 8)
+	watchDone := make(chan error, 1)
+	go func() {
+		reconnect, err := watchWorkspaceEventsOnce(ctx, socketPath,
+			func(id string) error {
+				observed <- id
+				return state.Record(dir, id)
+			},
+			func(id string) error {
+				return state.RemoveWorkspace(dir, id)
+			},
+		)
+		_ = listener.Close()
+		if reconnect {
+			watchDone <- err
+			return
+		}
+		watchDone <- err
+	}()
+
+	select {
+	case got := <-observed:
+		require.Equal(t, "W1", got)
+	case <-ctx.Done():
+		t.Fatal("watcher never observed the initial snapshot focus")
+	}
+
+	m, err := state.LoadFocusMRU(dir)
+	require.NoError(t, err)
+	assert.Equal(t, "W1", m.WorkspaceCurrent)
+	assert.Equal(t, "W0", m.WorkspaceLast)
+
+	// Simulate last-agent jumping to a tab in W3 while the watcher is connected:
+	// arm the one-shot suppression, then deliver the workspace.focused W3 event
+	// through the protocol-20 batch plus its snapshot reconciliation.
+	require.NoError(t, state.PrepareAgentJump(dir, "W3"))
+	close(jumpArmed)
+
+	select {
+	case <-watchDone:
+	case <-ctx.Done():
+		t.Fatal("watcher did not finish")
+	}
+	require.NoError(t, <-serverDone)
+
+	m, err = state.LoadFocusMRU(dir)
+	require.NoError(t, err)
+	assert.Equal(t, "W1", m.WorkspaceCurrent)
+	assert.Equal(t, "W0", m.WorkspaceLast)
+	assert.Empty(t, m.SkipWorkspaceID)
+	target, ok, err := state.WorkspaceToggleTarget(dir, "W3")
+	require.NoError(t, err)
+	require.True(t, ok)
+	assert.Equal(t, "W0", target)
+
+	// The suppression is one-shot: the next independent real focus change
+	// must still update the pair normally.
+	require.NoError(t, state.Record(dir, "W4"))
+	m, err = state.LoadFocusMRU(dir)
+	require.NoError(t, err)
+	assert.Equal(t, "W4", m.WorkspaceCurrent)
+	assert.Equal(t, "W1", m.WorkspaceLast)
+	target, ok, err = state.WorkspaceToggleTarget(dir, "W4")
+	require.NoError(t, err)
+	require.True(t, ok)
+	assert.Equal(t, "W1", target)
 }
 
 func listenTestSocket(t *testing.T) (net.Listener, string) {

@@ -192,6 +192,7 @@ func drainBufferedEvents(events <-chan workspaceEvent, buffered []workspaceEvent
 }
 
 func applyWorkspaceEvents(events []workspaceEvent, snapshot *sessionSnapshot, onFocused, onClosed func(string) error) error {
+	var lastFocused string
 	for _, event := range events {
 		if snapshot != nil {
 			exists := snapshot.WorkspaceIDs[event.Data.WorkspaceID]
@@ -199,11 +200,14 @@ func applyWorkspaceEvents(events []workspaceEvent, snapshot *sessionSnapshot, on
 				continue
 			}
 		}
+		if event.Event == "workspace_focused" {
+			lastFocused = event.Data.WorkspaceID
+		}
 		if err := applyWorkspaceEvent(event, onFocused, onClosed); err != nil {
 			return err
 		}
 	}
-	if snapshot != nil && snapshot.FocusedWorkspaceID != "" {
+	if snapshot != nil && snapshot.FocusedWorkspaceID != "" && snapshot.FocusedWorkspaceID != lastFocused {
 		return onFocused(snapshot.FocusedWorkspaceID)
 	}
 	return nil
